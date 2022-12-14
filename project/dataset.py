@@ -517,6 +517,28 @@ class BufferedGeoDataLoader(pl.LightningDataModule):
 
         self.fold_mask = self.ds.fold_mask.load()
 
+        self.features_hourly = [
+            'rh_cf', 'ssrd', 't2m', 'tp'
+        ]
+        self.features_static = [
+            'canopyheight', 'rootdepth', 'percent_tree_cover', 'sandfrac', 'topidx', 'wtd'
+        ]
+        self.targets_daily = [
+            'fvc_ano'
+        ]
+        self.targets_hourly = [
+            #'lst'
+        ]
+
+    def get_dummy_batch(self):
+        return BatchPattern(
+            f_hourly=torch.randn(self.batch_size, 24, 1000, len(self.features_hourly)) if self.features_hourly else None,
+            f_static=torch.randn(self.batch_size, len(self.features_static)) if self.features_static else None,
+            t_daily=torch.randn(self.batch_size, 1000, len(self.targets_daily)) if self.targets_daily else None,
+            t_hourly=torch.randn(self.batch_size, 24, 1000, len(self.targets_hourly)) if self.targets_hourly else None,
+            coords=Coords(lat=torch.arange(self.batch_size), lon=torch.arange(self.batch_size))
+        )
+
     @staticmethod
     def get_fold_split(fold_id: int, num_folds: int) -> tuple[list[int], list[int], list[int]]:
 
@@ -539,18 +561,10 @@ class BufferedGeoDataLoader(pl.LightningDataModule):
             mask=mask,
             batch_size=self.batch_size,
             num_buffer=self.num_chunk_preload,
-            features_hourly=[
-                'rh_cf', 'ssrd', 't2m', 'tp'
-            ],
-            features_static=[
-                'canopyheight', 'rootdepth', 'percent_tree_cover', 'sandfrac', 'topidx', 'wtd'
-            ],
-            targets_daily=[
-                'fvc_ano'
-            ],
-            # targets_hourly=[
-            #     'lst'
-            # ],
+            features_hourly=self.features_hourly,
+            features_static=self.features_static,
+            targets_daily=self.targets_daily,
+            targets_hourly=self.targets_hourly,
             drop_last=False
         )
 
