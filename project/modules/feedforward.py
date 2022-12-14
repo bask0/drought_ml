@@ -5,6 +5,42 @@ from torch import Tensor
 from project.utils.torch_utils import get_activation
 
 
+class FeedForwardBlock(nn.Module):
+    """Implements a FeedForward block.
+
+    Args:
+        num_inputs (int): input dimensionality
+        num_outputs (int): output dimensionality
+        dropout (float): dropout applied after each HIDDEN layer, in range [0, 1)
+        activation (str): activation function, see `get_activation`
+        residual (bool): whether to add a residual connection, default is `False`.
+        batch_norm (bool): wheter to use batch normalizations in all but the
+            last layer. Defaults to `False`.
+    """
+
+    def __init__(
+            self,
+            num_inputs: int,
+            num_outputs: int,
+            dropout: float,
+            activation: str,
+            batch_norm: bool = False) -> None:
+
+        super().__init__()
+
+        self.block = nn.Sequential()
+
+        self.block.add_module('linear', nn.Linear(num_inputs, num_outputs))
+        if batch_norm:
+            self.block.add_module('batch_norm', nn.BatchNorm1d(num_outputs))
+        if dropout > 0.0:
+            self.block.add_module('dropout', nn.Dropout(dropout))
+        self.block.add_module('activation', get_activation(activation))
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.block(x)
+
+
 class FeedForward(nn.Module):
     """Implements a feed-forward neural networks with 1 to n layers.
 
@@ -13,17 +49,19 @@ class FeedForward(nn.Module):
     last layer are optional (see `activation_last` and `dropout_last`).
 
     Args:
-        num_inputs: input dimensionality
-        num_outputs: output dimensionality
-        num_hidden: number of hidden units
-        num_layers: number of fully-connected hidden layers
-        dropout: dropout applied after each layer, in range [0, 1)
-        activation: activation function, see `get_activation`
-        activation_last: output activation, see `get_activation`.
+        num_inputs (int): input dimensionality
+        num_outputs (int): output dimensionality
+        num_hidden (int): number of hidden units
+        num_layers (int): number of fully-connected hidden layers (not
+            incliding the input and output layers)
+        dropout (float): dropout applied after each HIDDEN layer, in range [0, 1)
+        activation (str): activation function, see `get_activation`
+        activation_last (str, optional): output activation, see `get_activation`.
             Defaults to None (=identity).
-        dropout_last: If `True`, the dropout is also
+        dropout_last (bool, optional): if `True`, the dropout is also
             applied after last layer. Defaults to False.
-        batch_norm: Wheter to use batch normalizations in all but the
+        residual (bool): whether to add a residual connection, default is `False`.
+        batch_norm (bool): wheter to use batch normalizations in all but the
             last layer. Defaults to `False`.
 
     """
@@ -37,48 +75,63 @@ class FeedForward(nn.Module):
             activation: str,
             activation_last: str | None = None,
             dropout_last: bool = False,
+            residual: bool = False,
             batch_norm: bool = False) -> None:
 
         super().__init__()
 
-        in_sizes = [num_inputs] + [num_hidden] * (num_layers - 1)
-        out_sizes = [num_hidden] * (num_layers - 1) + [num_outputs]
+        self.residual = residual
+        if self.residual:
+            self.residual_transform = nn.Linear(num_inputs, num_hidden)
 
-        layers = {}
-        is_last = False
-        for idx, (ni, no) in enumerate([(ni, no) for ni, no in
-                                        zip(in_sizes, out_sizes)]):
+        self.layer_in = FeedForwardBlock(
+            num_inputs=num_inputs,
+            num_outputs=num_hidden,
+            dropout=0.0,
+            activation=activation,
+            batch_norm=batch_norm
+        )
 
-            layer = nn.Linear(ni, no)
+        self.layers_hidden = nn.ModuleDict()
+        for idx in range(num_layers):
+            layer_hidden = FeedForwardBlock(
+                num_inputs=num_hidden,
+                num_outputs=num_hidden,
+                dropout=dropout,
+                activation=activation,
+                batch_norm=batch_norm
+            )
+            self.layers_hidden.update({f'layer_h{idx:02d}': layer_hidden})
 
-            if idx == num_layers - 1:
-                is_last = True
-            layers.update({f'linear{idx:02d}': layer})
-
-            if not is_last:
-                layers.update({f'dropout{idx:02d}': nn.Dropout(dropout)})
-                if batch_norm:
-                    layers.update({f'batch_norm{idx:02d}': nn.BatchNorm1d(no)})
-                layers.update({f'activation{idx:02d}': get_activation(activation)})
-
-            if is_last and dropout_last:
-                layers.update({f'dropout{idx:02d}': nn.Dropout(dropout)})
-
-            if is_last and activation_last is not None:
-                layers.update({f'activation{idx:02d}': get_activation(activation_last)})
-
-        self.model = nn.Sequential()
-
-        for k, v in layers.items():
-            self.model.add_module(k, v)
+        self.layer_out = FeedForwardBlock(
+            num_inputs=num_hidden,
+            num_outputs=num_outputs,
+            dropout=dropout_last,
+            activation=activation_last,
+        )
 
     def forward(self, x: Tensor) -> Tensor:
         """Model forward call.
 
         Args:
-            x: the input tensor.
+            x (Tensor): the input tensor.
 
         Returns:
             Tensor: the output tensor.
         """
-        return self.model(x)
+
+        if self.residual:
+            x_res = self.residual_transform(x)
+        else:
+            x_res = 0.0
+
+        out = self.layer_in(x)
+
+        for _, layer in self.layers_hidden.items():
+            out = layer(out)
+
+        out = out + x_res
+
+        out = self.layer_out(out)
+
+        return out
