@@ -1,9 +1,11 @@
 
+from torch import nn
 from torch import Tensor
 
 from project.pl_models.base_model import LightningNet
 from modules.tcn import TemporalConvNet
 from modules.feedforward import FeedForward
+from utils.torch_utils import Transform
 
 
 class TemporalConvNetPL(LightningNet):
@@ -55,9 +57,9 @@ class TemporalConvNetPL(LightningNet):
 
         super().__init__(**kwargs)
 
-        self.feedforward_static = FeedForward(
+        self.encode_static = FeedForward(
             num_inputs=num_geofactors,
-            num_outputs=8,
+            num_outputs=num_hidden,
             num_hidden=32,
             num_layers=2,
             dropout=static_dropout,
@@ -65,6 +67,9 @@ class TemporalConvNetPL(LightningNet):
             activation_last='tanh',
             dropout_last=True
         )
+
+        self.flatten_time = Transform(transform_fun=lambda x: x.view(x.shape[0], -1, x.shape[-1]))
+        self.to_sequence_last = Transform(transform_fun=lambda x: x.permute(0, 2, 1))
 
         self.tcn = TemporalConvNet(
             num_inputs=num_inputs,
@@ -76,16 +81,13 @@ class TemporalConvNetPL(LightningNet):
             dropout=dropout
         )
 
-        self.linear_out = FeedForward(
-            num_inputs=num_hidden,
-            num_outputs=num_outputs,
-            num_hidden=0,
-            num_layers=0,
-            dropout=0.0,
-            activation=None,
-            activation_last='sigmoid',  # For FVC.
-            dropout_last=False
-        )
+        self.downscale = nn.Conv1d(
+            in_channels=num_hidden,
+            out_channels=num_outputs,
+            kernel_size=24,
+            stride=24)
+
+        self.to_channel_last = Transform(transform_fun=lambda x: x.permute(0, 2, 1))
 
         self.save_hyperparameters()
 
@@ -100,11 +102,19 @@ class TemporalConvNetPL(LightningNet):
             the output sequential tensor with shape (batch_size, sequence_length, num_outputs).
         """
 
-        if (self.fusion_type == 'pre') or (self.fusion_type == 'none'):
-            out = self.prefuse(x, s)
-            out = self.tcn(out)
-        else:
-            out = self.tcn(x)
-            out = self.postfuse(out, s)
+        if s is not None:
+            #  (B, FS) -> (B, FS*)
+            s = self.encode_static(s)
+
+        # (B, H, S, FH) -> (B, HxS, FH)
+        out = self.flatten_time(x)
+        # (B, HxS, FH) -> (B, FH, HxS)
+        out = self.to_sequence_last(out)
+        # (B, FH, HxS), (B, FS*) -> (B, D, HxS)
+        out = self.tcn(out, s)
+        # (B, D, HxS) -> (B, O, S)
+        out = self.downscale(out)
+        # (B, O, S) -> (B, S, O)
+        out = self.to_channel_last(out)
 
         return out

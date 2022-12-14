@@ -63,6 +63,7 @@ class Residual(nn.Module):
             x: (batch_size, num_outputs, sequence_length)
             res: (batch_size, num_inputs, sequence_length)
             s_res: (batch_size, num_static_inputs)
+            output: (batch_size, num_outputs, sequence_length)
 
         Args:
             x: the input.
@@ -76,7 +77,11 @@ class Residual(nn.Module):
         if s_res is None:
             return x + self.downsample(res)
         else:
-            res = torch.cat(res, s_res.unsqueeze(-1).expand(*res.shape), dim=-2)
+            res = torch.cat((
+                res,
+                s_res.unsqueeze(-1).expand(s_res.shape[0], s_res.shape[1], res.shape[-1]
+            )), dim=-2)
+
             return x + self.downsample(res)
 
     def init_weights(self) -> None:
@@ -123,7 +128,7 @@ class TemporalBlock(nn.Module):
         self.relu2 = nn.ReLU()
         self.dropout2 = nn.Dropout(dropout)
 
-        self.res = Residual(n_inputs, n_outputs + n_static_inputs)
+        self.res = Residual(n_inputs + n_outputs, n_outputs)
         self.relu = nn.ReLU()
         self.init_weights()
 
@@ -132,7 +137,7 @@ class TemporalBlock(nn.Module):
         self.conv2.weight.data.normal_(0, 0.01)
         self.res.init_weights()
 
-    def forward(self, x: Tensor, s: Tensor | None = None) -> Tensor:
+    def forward(self, x: Tensor, s = Tensor | None) -> Tensor:
         """Model forward run.
 
         Shapes:
@@ -148,6 +153,7 @@ class TemporalBlock(nn.Module):
         Returns:
             The output tensor.
         """
+
         out = self.conv1(x)
         out = self.chomp1(out)
         out = self.relu1(out)
@@ -180,8 +186,9 @@ class TemporalConvNet(nn.Module):
             The TCN layer is followed by a feedfoward layer to map the TCN output channels to `num_outputs`.
 
         Shapes:
-            Input:  (batch_size, sequence_length, input_size)
-            Output: (batch_size, sequence_length, num_outputs)
+            Input:  (batch_size, num_inputs, sequence_length)
+            Startic input:  (batch_size, num_static_inputs)
+            Output: (batch_size, num_outputs, sequence_length)
 
         Args:
             num_inputs: the number of input features.
@@ -199,12 +206,11 @@ class TemporalConvNet(nn.Module):
         self.kernel_size = kernel_size
         self.num_layers = num_layers
 
-        layers = []
+        self.tcn_layers = nn.ModuleDict()
         for i in range(num_layers):
             dilation_size = 2 ** i
             in_channels = num_inputs if i == 0 else num_hidden
-            layers += [
-                TemporalBlock(
+            layer = TemporalBlock(
                     n_inputs=in_channels,
                     n_static_inputs=num_static_inputs,
                     n_outputs=num_hidden,
@@ -213,32 +219,33 @@ class TemporalConvNet(nn.Module):
                     dilation=dilation_size,
                     padding=(kernel_size - 1) * dilation_size,
                     dropout=dropout)
-            ]
 
-        self.to_sequence_last = Transform(transform_fun=lambda x: x.permute(0, 2, 1))
-
-        self.tcn = nn.Sequential(*layers)
-
-        self.to_channel_last = Transform(transform_fun=lambda x: x.permute(0, 2, 1))
+            self.tcn_layers.update({f'layer_h{i:02d}': layer})
 
         if num_outputs == -1:
             self.linear = nn.Identity()
         else:
-            self.linear = nn.Linear(num_hidden, num_outputs)
+            self.linear = torch.nn.Conv1d(
+                in_channels=num_hidden,
+                out_channels=num_outputs,
+                kernel_size=1
+            )
 
     def forward(self, x: Tensor, s: Tensor | None = None) -> Tensor:
         """Run data through the model.
 
         Args:
-            x: the input data with shape (batch, seq, num_inputs).
-            x: the optional static input data with shape (batch, num_static_inputs).
+            x: the input data with shape (batch, num_inputs, seq).
+            s: the optional static input data with shape (batch, num_static_inputs).
 
         Returns:
             the model output tensor with shape (batch, seq, num_outputs).
         """
-        x = self.to_sequence_last(x)
-        out = self.tcn(x, s)
-        out = self.to_channel_last(out)
+
+        out = x
+        for _, layer in self.tcn_layers.items():
+            out = layer(out, s)
+
         out = self.linear(out)
         return out
 
