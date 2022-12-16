@@ -597,3 +597,19 @@ class BufferedGeoDataLoader(pl.LightningDataModule):
         fold_mask = self.fold_mask.sel(fold=self.test_folds).any('fold').load()
         dataloader = self.get_dataloader(mask=fold_mask)
         return dataloader
+
+    @property
+    def num_features_hourly(self) -> int:
+        return len(self.features_hourly)
+
+    @property
+    def num_features_static(self) -> int:
+        return len(self.features_static)
+
+    @property
+    def num_targets_daily(self) -> int:
+        return len(self.targets_daily)
+
+    @property
+    def num_targets_hourly(self) -> int:
+        return len(self.targets_hourly)
