@@ -706,3 +706,11 @@ def nan_mse(input: Tensor, target: Tensor) -> Tensor | None:
         return None
     else:
         return sse / n
+
+
+def get_worker_id():
+    worker_info = torch.utils.data.get_worker_info()
+    if worker_info is None:
+        return None
+    else:
+        return worker_info.id
