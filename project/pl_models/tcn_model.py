@@ -19,6 +19,7 @@ class TemporalConvNetPL(LightningNet):
             dropout: float,
             static_dropout: float,
             kernel_size: int = 4,
+            num_geofactors_enc: int = 4,
             **kwargs) -> None:
         """Implements a Temporal Convolutional Network (TCN).
 
@@ -50,6 +51,8 @@ class TemporalConvNetPL(LightningNet):
                 The kernel size. Defaults to 4.
             activation:
                 The activation function, defaults to 'relu'.
+            num_geofactors_enc:
+                The geofactor encoding dimensionality.
             **kwargs:
                 Are passed to the parent class `LightningNet`.
 
@@ -59,7 +62,7 @@ class TemporalConvNetPL(LightningNet):
 
         self.encode_static = FeedForward(
             num_inputs=num_geofactors,
-            num_outputs=num_hidden,
+            num_outputs=num_geofactors_enc,
             num_hidden=32,
             num_layers=2,
             dropout=static_dropout,
@@ -73,7 +76,7 @@ class TemporalConvNetPL(LightningNet):
 
         self.tcn = TemporalConvNet(
             num_inputs=num_inputs,
-            num_static_inputs=num_geofactors,
+            num_static_inputs=num_geofactors_enc,
             num_outputs=-1,  # No mapping because this is done in this module.
             num_hidden=num_hidden,
             kernel_size=kernel_size,
@@ -81,9 +84,31 @@ class TemporalConvNetPL(LightningNet):
             dropout=dropout
         )
 
+        self.tcn_mean = TemporalConvNet(
+            num_inputs=num_hidden,
+            num_static_inputs=num_geofactors_enc,
+            num_outputs=num_outputs,
+            num_hidden=num_hidden,
+            kernel_size=kernel_size,
+            num_layers=1,
+            dropout=dropout
+        )
+        self.tanh = nn.Tanh()
+
+        self.tcn_var = TemporalConvNet(
+            num_inputs=num_hidden,
+            num_static_inputs=num_geofactors_enc,
+            num_outputs=num_outputs,
+            num_hidden=num_hidden,
+            kernel_size=kernel_size,
+            num_layers=1,
+            dropout=dropout
+        )
+        self.softplus = nn.Softplus()
+
         self.downscale = nn.Conv1d(
-            in_channels=num_hidden,
-            out_channels=num_outputs,
+            in_channels=num_outputs,
+            out_channels=1,
             kernel_size=24,
             stride=24)
 
@@ -91,7 +116,7 @@ class TemporalConvNetPL(LightningNet):
 
         self.save_hyperparameters()
 
-    def forward(self, x: Tensor, s: Tensor | None = None) -> tuple[Tensor]:
+    def forward(self, x: Tensor, s: Tensor | None = None) -> tuple[Tensor, Tensor]:
         """Model forward call.
 
         Args:
@@ -99,7 +124,7 @@ class TemporalConvNetPL(LightningNet):
             s: the static features with shape (batch_size, features)
 
         Returns:
-            the output sequential tensor with shape (batch_size, sequence_length, num_outputs).
+            the mean and variance estimates, both with shape (batch_size, sequence_length, num_outputs).
         """
 
         if s is not None:
@@ -112,9 +137,17 @@ class TemporalConvNetPL(LightningNet):
         out = self.to_sequence_last(out)
         # (B, FH, HxS), (B, FS*) -> (B, D, HxS)
         out = self.tcn(out, s)
-        # (B, D, HxS) -> (B, O, S)
-        out = self.downscale(out)
-        # (B, O, S) -> (B, S, O)
-        out = self.to_channel_last(out)
 
-        return out
+        # (B, D, HxS) -> (B, D, HxS)
+        out_mean = self.tcn_mean(out, s)
+        out_var = self.tcn_var(out, s)
+
+        # (B, D, HxS) -> (B, O, S)
+        out_mean = self.downscale(out_mean)
+        out_var = self.downscale(out_var)
+
+        # (B, O, S) -> (B, S, O)
+        out_mean = self.tanh(self.to_channel_last(out_mean))
+        out_var = self.softplus(self.to_channel_last(out_var))
+
+        return out_mean, out_var
