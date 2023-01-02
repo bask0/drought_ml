@@ -77,13 +77,13 @@ class DataChunk(object):
             self,
             data: xr.Dataset,
             mask: xr.DataArray,
-            shuffle: bool = False,
             features_hourly: list[str] = [],
             features_static: list[str] = [],
             targets_hourly: list[str] = [],
             targets_daily: list[str] = [],
             feature_scaling: dict[str, dict[str, float]] = None,
             dtype: str = 'float32',
+            disable_shuffling: bool = False,
             dummy_data: bool = False) -> None:
 
         if dummy_data:
@@ -95,8 +95,6 @@ class DataChunk(object):
         data = data.stack(sample=('lat', 'lon')).reset_coords(drop=True)
         self.data = data.where(mask, drop=True).load()
 
-        self.shuffle = shuffle
-
         self.features_hourly = features_hourly
         self.features_static = features_static
         self.targets_hourly = targets_hourly
@@ -104,6 +102,7 @@ class DataChunk(object):
 
         self.feature_scaling = feature_scaling
         self.dtype = dtype
+        self.disable_shuffling = disable_shuffling
         self.dummy_data = dummy_data
 
         self.coords = self._get_coords()
@@ -161,7 +160,7 @@ class DataChunk(object):
 
     def _get_coords(self) -> Iterable:
         coords = np.arange(len(self.data.sample))
-        if self.shuffle:
+        if not self.disable_shuffling:
             np.random.shuffle(coords)
         return coords
 
@@ -188,6 +187,7 @@ class QueueFiller(object):
             targets_daily: list[str] = [],
             drop_last: bool = False,
             chunk_size: int = 20,
+            disable_shuffling: bool = False,
             dummy_data: bool = False) -> None:
         """Initialize QueueFiller.
 
@@ -209,6 +209,7 @@ class QueueFiller(object):
             drop_last: Whether to drop the last batch with size < `batch_size`. Default is `False`.
             chunk_size: the latitude/longitude chunk sizes. Must divide the
                 `ds.lat`/`ds.lon` chunk size without remainder.
+            disable_shuffling: if `True` shuffling will be turned off. Default is `False`.
             dummy_data: if set to `True`, dummy data is returned and reading from disk is omitted; use for debugging.
                 Default is `False`.
 
@@ -231,6 +232,7 @@ class QueueFiller(object):
         self.chunk_buffer_size = chunk_buffer_size
         self.drop_last = drop_last
         self.chunk_size = chunk_size
+        self.disable_shuffling = disable_shuffling
         self.dummy_data = dummy_data
 
         self.feature_scaling = self._get_scaling(self.data, self.features_hourly, self.features_static)
@@ -276,12 +278,12 @@ class QueueFiller(object):
                                 DataChunk(
                                     data=data_chunk,
                                     mask=mask_chunk,
-                                    shuffle=True,
                                     features_hourly=self.features_hourly,
                                     features_static=self.features_static,
                                     targets_daily=self.targets_daily,
                                     targets_hourly=self.targets_hourly,
                                     feature_scaling=self.feature_scaling,
+                                    disable_shuffling=self.disable_shuffling,
                                     dummy_data=self.dummy_data
                                 )
                             )
@@ -399,6 +401,7 @@ class DataQueue(IterableDataset):
             targets_daily: list[str] = [],
             drop_last: bool = False,
             chunk_size: int = 20,
+            disable_shuffling: bool = False,
             dummy_data: bool = False):
         super().__init__()
 
@@ -414,6 +417,7 @@ class DataQueue(IterableDataset):
         self.targets_daily = targets_daily
         self.drop_last = drop_last
         self.chunk_size = chunk_size
+        self.disable_shuffling = disable_shuffling
         self.dummy_data = dummy_data
 
         self.num_samples = self.mask.sum().compute().item()
@@ -439,6 +443,7 @@ class DataQueue(IterableDataset):
             targets_daily=self.targets_daily,
             targets_hourly=self.targets_hourly,
             drop_last=False,
+            disable_shuffling=self.disable_shuffling,
             dummy_data=self.dummy_data
         )
 
@@ -473,7 +478,12 @@ class DataQueue(IterableDataset):
 
         with GracefulExit(processes=processes, manager=manager):
 
-            for i in np.random.permutation(num_chunks):
+            if self.disable_shuffling:
+                chunk_ids = np.random.permutation(num_chunks)
+            else:
+                chunk_ids = np.arange(num_chunks)
+
+            for i in chunk_ids:
                 index_queue.put(i)
 
             for process in processes:
@@ -632,30 +642,33 @@ class GeoDataQueue(pl.LightningDataModule):
             queue_size: int = 100,
             num_queue_workers: int = 12,
             chunk_size: int = 20,
+            disable_shuffling: bool = False,
             cube_path: str = '/Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr',
             dummy_data: bool = False,
             **dataloader_kwargs):
         """GeoDataQueue initialization.
 
-        Parameters
-        ----------
-        fold_id: the fold ID, an integer in the range (0, `num_folds` - 1).
-        num_folds: the number of folds, a positive integer that matches the number of folds
-            in the `fold_mask` (a variable of the dataset). Default is 6.
-        batch_size: the batch size, an integer > 0. Default is 50.
-        chunk_buffer_size: the number of spatial chunks to be buffered, an integer > 0.
-            Note that smaller values lead to less randomness in the samples (they tend to come from
-            the same spatial chunk for continuous batches), and large values lead to long initialization
-            time. Values between 3 and 6 are suggested. Default is 4.
-        queue_size: the number of batches to queue up.
-        num_queue_workers: number of workers that fill batch queue in parallel.
-        chunk_size: the latitude/longitude chunk sizes. Must divide the
-            `ds.lat`/`ds.lon` chunk size without remainder.
-        cube_path: the path to the data cube (zarr format).
-            Default is '/Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr'.
-        dummy_data: if set to `True`, dummy data is returned and reading from disk is omitted; use for debugging.
-            Default is `False`.
-        dataloader_kwargs: keyword arguments passed to `torch.Dataset(...)`
+        Args:
+            fold_id: the fold ID, an integer in the range (0, `num_folds` - 1).
+            num_folds: the number of folds, a positive integer that matches the number of folds
+                in the `fold_mask` (a variable of the dataset). Default is 6.
+            batch_size: the batch size, an integer > 0. Default is 50.
+            chunk_buffer_size: the number of spatial chunks to be buffered, an integer > 0.
+                Note that smaller values lead to less randomness in the samples (they tend to come from
+                the same spatial chunk for continuous batches), and large values lead to long initialization
+                time. Values between 3 and 6 are suggested. Default is 4.
+            queue_size: the number of batches to queue up.
+            num_queue_workers: number of workers that fill batch queue in parallel.
+            chunk_size: the latitude/longitude chunk sizes. Must divide the
+                `ds.lat`/`ds.lon` chunk size without remainder.
+            disable_shuffling: if `True` shuffling will be turned off for all dataloaders. By default,
+                shuffling is turned on for all dataloaders. If Pytorch Lightning's overfit
+                features (`pl.Trainer(overfit_batches=n)`) is used, `disable_shuffling=True` is be forced.
+            cube_path: the path to the data cube (zarr format).
+                Default is '/Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr'.
+            dummy_data: if set to `True`, dummy data is returned and reading from disk is omitted; use for debugging.
+                Default is `False`.
+            dataloader_kwargs: keyword arguments passed to `torch.Dataset(...)`
         """
         super().__init__()
 
@@ -666,6 +679,7 @@ class GeoDataQueue(pl.LightningDataModule):
         self.queue_size = queue_size
         self.num_queue_workers = num_queue_workers
         self.chunk_size = chunk_size
+        self.disable_shuffling = disable_shuffling
         self.dummy_data = dummy_data
         self.dataloader_kwargs = dataloader_kwargs
 
@@ -684,7 +698,7 @@ class GeoDataQueue(pl.LightningDataModule):
             'canopyheight', 'rootdepth', 'percent_tree_cover', 'sandfrac', 'topidx', 'wtd'
         ]
         self.targets_daily = [
-            'fvc_ano'
+            'fvc'
         ]
         self.targets_hourly = [
             #'lst'
@@ -753,6 +767,11 @@ class GeoDataQueue(pl.LightningDataModule):
                 f'`cvset`  must be one of \'train\', \'valid\', \'test\', or \'predict\',  is \'{cvset}\'.'
             )
 
+        if self.trainer.overfit_batches > 0:
+            disable_shuffling = True
+        else:
+            disable_shuffling = self.disable_shuffling
+
         dataqueue = DataQueue(
             data=self.ds,
             mask=mask,
@@ -765,6 +784,7 @@ class GeoDataQueue(pl.LightningDataModule):
             targets_daily=self.targets_daily,
             targets_hourly=self.targets_hourly,
             drop_last=False,
+            disable_shuffling=disable_shuffling,
             dummy_data=self.dummy_data
         )
 
@@ -772,6 +792,7 @@ class GeoDataQueue(pl.LightningDataModule):
             dataqueue,
             num_workers=0,  # Cannot be > 0 as we spawn subprocesses in dataqueue.
             batch_size=None,
+            shuffle=False,  # Do not change, has no impact as we use a custom IterableDataset.
             **self.dataloader_kwargs)
 
         return dataloader
