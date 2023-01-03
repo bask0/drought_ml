@@ -1,16 +1,16 @@
 
 import pytorch_lightning as pl
-
 import logging
-
 from torch import Tensor, optim
 import numpy as np
+from collections import namedtuple
 
 from typing import Optional, Any, Union
 
-from project.utils.torch_utils import nan_mse
+from project.utils.loss_functions import RegressionLoss
 from project.dataset import BatchPattern
 
+ReturnPattern = namedtuple('ReturnPattern', 'mean_hat var_hat coords')
 
 logger = logging.getLogger('lightning')
 
@@ -24,7 +24,7 @@ class LightningNet(pl.LightningModule):
             weight_decay: float,
             max_epochs: int = -1,
             use_mt_weighting: Union[bool, str] = False,
-            use_n_last: int = 366 * 24,
+            use_n_last: int = 365 + 366,
             **kwargs) -> None:
         """Standard lightning module, should be subclassed.
 
@@ -86,6 +86,8 @@ class LightningNet(pl.LightningModule):
 
         self.loss_nan_counter = 0
 
+        self.loss_fn = RegressionLoss('l2', sample_wise=False)
+
     @staticmethod
     def add_model_specific_args(parent_parser):
         parser = parent_parser.add_argument_group('Optimizer')
@@ -136,24 +138,29 @@ class LightningNet(pl.LightningModule):
         if step_type not in ('train', 'val', 'test', 'pred'):
             raise ValueError(f'`step_type` must be one of (`train`, `val`, `test`, `pred`), is {step_type}.')
 
-        y_hat = self(batch.f_static, batch.f_static)
+        y_mean_hat, y_var_hat = self(batch.f_hourly, batch.f_static)
 
-        y_hat = y_hat[:, -self.use_n_last:, :]
-        y = batch['tasks'][:, -self.use_n_last:, :]
+        #y_hat = y_hat[:, -self.use_n_last:, :]
+        #y = batch['tasks'][:, -self.use_n_last:, :]
 
         # loss, loss_dict = self.mt_loss_fn(
         #     step_type=step_type,
         #     preds=y_hat,
         #     targets=y
         # )
-        loss = nan_mse(y_hat, batch.t_daily)
 
-        batch_size = y_hat.shape[0]
+        # 1-ahead prediction, thus targets are shifted.
+        loss = self.loss_fn(
+            input=y_mean_hat[:, self.use_n_last:-1, :],
+            #variance=y_var_hat[:,self.use_n_last:-1,:],
+            target=batch.t_daily[:, self.use_n_last+1:, :]
+        )
 
+        batch_size = y_mean_hat.shape[0]
         if step_type != 'pred':
-            self.log(f'{step_type}_loss', loss, batch_size=batch_size)
+            self.log(f'{step_type}_loss', loss, on_step=step_type=='train', on_epoch=True, batch_size=batch_size)
 
-        return loss, y_hat
+        return loss, ReturnPattern(mean_hat=y_mean_hat, var_hat=y_var_hat, coords=batch.coords)
 
     def training_step(
             self,
@@ -214,7 +221,9 @@ class LightningNet(pl.LightningModule):
 
         """
 
-        self.shared_step(batch, step_type='test')
+        loss, _ = self.shared_step(batch, step_type='test')
+
+        return {'test_loss': loss}
 
     def predict_step(
             self,
@@ -254,37 +263,10 @@ class LightningNet(pl.LightningModule):
             The optimizer.
         """
 
-        # optimizer = optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        model_parameters = []
-        task_parameters = []
+        optimizer = optim.AdamW(
+            self.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay
+        )
 
-        for k, v in self.named_parameters():
-            if 'loss_sigmas' in k:
-                task_parameters.append(v)
-            else:
-                model_parameters.append(v)
-
-        if self.use_mt_weighting:
-            optimizer = optim.AdamW(
-                [
-                    {
-                        'params': model_parameters,
-                        'lr': self.lr,
-                        'weight_decay': self.weight_decay
-                    },
-                    {
-                        'params': task_parameters,
-                        'lr': 0.01,
-                        'weight_decay': 0.0
-                    }],
-            )
-        else:
-            optimizer = optim.AdamW(
-                [
-                    {
-                        'params': model_parameters,
-                        'lr': self.lr,
-                        'weight_decay': self.weight_decay
-                    }
-                ]
-            )
+        return optimizer
