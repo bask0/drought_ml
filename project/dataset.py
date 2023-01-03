@@ -495,7 +495,7 @@ class DataQueue(IterableDataset):
 
             while has_more_batches:
                 try:
-                    el = batch_queue.get_nowait()
+                    el: BatchPattern = batch_queue.get_nowait()
 
                     if isinstance(el, Exception):
                         raise el
@@ -769,14 +769,16 @@ class GeoDataQueue(pl.LightningDataModule):
 
         if self.trainer.overfit_batches > 0:
             disable_shuffling = True
+            num_queue_workers = 1
         else:
             disable_shuffling = self.disable_shuffling
+            num_queue_workers = self.num_queue_workers
 
         dataqueue = DataQueue(
             data=self.ds,
             mask=mask,
             batch_size=self.batch_size,
-            num_queue_workers=self.num_queue_workers,
+            num_queue_workers=num_queue_workers,
             queue_size=self.queue_size,
             chunk_buffer_size=chunk_buffer_size,
             features_hourly=self.features_hourly,
