@@ -19,7 +19,7 @@ class TemporalConvNetPL(LightningNet):
             dropout: float,
             static_dropout: float,
             kernel_size: int = 4,
-            num_geofactors_enc: int = 4,
+            num_geofactors_enc: int = 6,
             **kwargs) -> None:
         """Implements a Temporal Convolutional Network (TCN).
 
@@ -68,7 +68,7 @@ class TemporalConvNetPL(LightningNet):
             dropout=static_dropout,
             activation='relu',
             activation_last='tanh',
-            dropout_last=True
+            dropout_last=False
         )
 
         self.flatten_time = Transform(transform_fun=lambda x: x.view(x.shape[0], -1, x.shape[-1]))
@@ -77,7 +77,7 @@ class TemporalConvNetPL(LightningNet):
         self.tcn = TemporalConvNet(
             num_inputs=num_inputs,
             num_static_inputs=num_geofactors_enc,
-            num_outputs=-1,  # No mapping because this is done in this module.
+            num_outputs=-1,
             num_hidden=num_hidden,
             kernel_size=kernel_size,
             num_layers=num_layers,
@@ -93,7 +93,6 @@ class TemporalConvNetPL(LightningNet):
             num_layers=1,
             dropout=dropout
         )
-        self.tanh = nn.Tanh()
 
         self.tcn_var = TemporalConvNet(
             num_inputs=num_hidden,
@@ -104,13 +103,15 @@ class TemporalConvNetPL(LightningNet):
             num_layers=1,
             dropout=dropout
         )
-        self.softplus = nn.Softplus()
 
         self.downscale = nn.Conv1d(
             in_channels=num_outputs,
             out_channels=1,
             kernel_size=24,
             stride=24)
+
+        self.mean_act = nn.Identity()
+        self.var_act = nn.Softplus()
 
         self.to_channel_last = Transform(transform_fun=lambda x: x.permute(0, 2, 1))
 
@@ -147,7 +148,7 @@ class TemporalConvNetPL(LightningNet):
         out_var = self.downscale(out_var)
 
         # (B, O, S) -> (B, S, O)
-        out_mean = self.tanh(self.to_channel_last(out_mean))
-        out_var = self.softplus(self.to_channel_last(out_var))
+        out_mean = self.mean_act(self.to_channel_last(out_mean))
+        out_var = self.var_act(self.to_channel_last(out_var))
 
         return out_mean, out_var
