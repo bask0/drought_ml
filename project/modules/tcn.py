@@ -128,7 +128,7 @@ class TemporalBlock(nn.Module):
         self.relu2 = nn.ReLU()
         self.dropout2 = nn.Dropout(dropout)
 
-        self.res = Residual(n_inputs + n_outputs, n_outputs)
+        self.res = Residual(n_inputs + n_static_inputs, n_outputs)
         self.relu = nn.ReLU()
         self.init_weights()
 
