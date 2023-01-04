@@ -32,8 +32,6 @@ from torch import Tensor
 import torch.nn as nn
 import torch.nn.utils.weight_norm as weight_norm
 
-from utils.torch_utils import Transform
-
 
 class Chomp1d(nn.Module):
     def __init__(self, chomp_size: int) -> None:
