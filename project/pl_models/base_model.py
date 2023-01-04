@@ -159,8 +159,8 @@ class LightningNet(pl.LightningModule):
 
     def training_step(
             self,
-            batch: dict[str, Any],
-            batch_idx: int) -> dict[str, Tensor]:
+            batch: BatchPattern,
+            batch_idx: int) -> Tensor:
         """A single training step.
 
         Args:
@@ -190,7 +190,7 @@ class LightningNet(pl.LightningModule):
 
     def validation_step(
             self,
-            batch: dict[str, Any],
+            batch: BatchPattern,
             batch_idx: int) -> dict[str, Tensor]:
         """A single validation step.
 
@@ -206,8 +206,8 @@ class LightningNet(pl.LightningModule):
 
     def test_step(
             self,
-            batch: dict[str, Any],
-            batch_idx: int) -> None:
+            batch: BatchPattern,
+            batch_idx: int) -> dict[str, Tensor]:
         """A single test step.
 
         Args:
@@ -222,9 +222,9 @@ class LightningNet(pl.LightningModule):
 
     def predict_step(
             self,
-            batch: dict[str, Any],
+            batch: BatchPattern,
             batch_idx: int,
-            dataloader_idx: int = 0) -> dict[str, Any]:
+            dataloader_idx: int = 0) -> ReturnPattern:
         """A single predict step.
 
         Args:
