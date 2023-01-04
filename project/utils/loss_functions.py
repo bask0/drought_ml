@@ -137,7 +137,7 @@ class RegressionLoss(nn.Module):
 
         if criterion not in ('l1', 'l2', 'huber', 'betanll'):
             raise ValueError(
-                f'argument `criterion` must be one of (\'l1\' | \'l2\', | \'huber\' | \'betanll\'), is {criterion}.'
+                f'argument `criterion` must be one of (\'l1\' | \'l2\', | \'huber\' | \'betanll\'), is \'{criterion}\`.'
             )
 
         if criterion == 'betanll':
