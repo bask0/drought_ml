@@ -5,7 +5,7 @@ from torch import Tensor, optim
 import numpy as np
 from collections import namedtuple
 
-from typing import Optional, Any, Union
+from typing import Any, Union
 
 from project.utils.loss_functions import RegressionLoss
 from project.dataset import BatchPattern
@@ -124,7 +124,7 @@ class LightningNet(pl.LightningModule):
     def shared_step(
             self,
             batch: BatchPattern,
-            step_type: str) -> tuple[Tensor, Tensor, Optional[Tensor]]:
+            step_type: str) -> tuple[Tensor, ReturnPattern]:
         """A single training step shared across specialized steps that returns the loss and the predictions.
 
         Args:
@@ -229,7 +229,7 @@ class LightningNet(pl.LightningModule):
             self,
             batch: dict[str, Any],
             batch_idx: int,
-            dataloader_idx: Optional[int] = None) -> dict[str, Any]:
+            dataloader_idx: int = 0) -> dict[str, Any]:
         """A single predict step.
 
         Args:
@@ -238,23 +238,9 @@ class LightningNet(pl.LightningModule):
 
         """
 
-        _, y_hat = self.shared_step(batch, step_type='pred')
+        _, preds = self.shared_step(batch, step_type='pred')
 
-        s = {k: batch[k] for k in ['site', 'date_start', 'date_end', 'siteind']}
-
-        # Adapt date to match self.use_n_last.
-        dataloader = self.trainer.predict_dataloaders[0]
-
-        if y_hat.shape[1] != 1:
-            for i, date_end in enumerate(s['date_end']):
-                ds_time = dataloader.dataset.ds.time
-                date_end_idx = np.argwhere((ds_time == ds_time.sel(time=date_end).idxmax('time')).values)[0]
-                date_start = ds_time[date_end_idx - self.use_n_last + 1]
-                s['date_start'][i] = date_start.dt.strftime('%Y-%m-%d').item()
-        else:
-            s['date_start'] = [None] * len(s['date_start'])
-
-        return {'y_hat': y_hat, 'data_sel': s}
+        return preds
 
     def configure_optimizers(self) -> optim.Optimizer:
         """Returns an optimizer configuration.
