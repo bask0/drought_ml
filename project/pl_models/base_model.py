@@ -5,10 +5,14 @@ from torch import Tensor, optim
 import numpy as np
 from collections import namedtuple
 
+import warnings
 from typing import Any, Union
 
 from project.utils.loss_functions import RegressionLoss
 from project.dataset import BatchPattern
+
+# Ignore anticipated PL warnings.
+warnings.filterwarnings('ignore', '.*infer the indices fetched for your dataloader.*')
 
 ReturnPattern = namedtuple('ReturnPattern', 'mean_hat var_hat coords')
 
@@ -86,7 +90,7 @@ class LightningNet(pl.LightningModule):
 
         self.loss_nan_counter = 0
 
-        self.loss_fn = RegressionLoss('l2', sample_wise=False)
+        self.loss_fn = RegressionLoss('betanll', sample_wise=False, beta=0.5)
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -140,19 +144,10 @@ class LightningNet(pl.LightningModule):
 
         y_mean_hat, y_var_hat = self(batch.f_hourly, batch.f_static)
 
-        #y_hat = y_hat[:, -self.use_n_last:, :]
-        #y = batch['tasks'][:, -self.use_n_last:, :]
-
-        # loss, loss_dict = self.mt_loss_fn(
-        #     step_type=step_type,
-        #     preds=y_hat,
-        #     targets=y
-        # )
-
         # 1-ahead prediction, thus targets are shifted.
         loss = self.loss_fn(
             input=y_mean_hat[:, self.use_n_last:-1, :],
-            #variance=y_var_hat[:,self.use_n_last:-1,:],
+            variance=y_var_hat[:, self.use_n_last:-1, :],
             target=batch.t_daily[:, self.use_n_last+1:, :]
         )
 
