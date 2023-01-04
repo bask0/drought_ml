@@ -1,8 +1,6 @@
 import torch
 from torch.utils.data import IterableDataset, DataLoader, default_collate
 import pytorch_lightning as pl
-
-
 import xarray as xr
 import dask
 import numpy as np
@@ -11,11 +9,8 @@ import torch.multiprocessing as mp
 import queue
 import time
 
-import logging
-from typing import Any, Iterable
-
 import warnings
-
+from typing import Any, Iterable
 
 # Ignore anticipated PL warnings.
 warnings.filterwarnings('ignore', '.*does not have many workers.*')
