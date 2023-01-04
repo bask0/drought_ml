@@ -14,10 +14,20 @@ import time
 import logging
 from typing import Any, Iterable
 
-BatchPattern = namedtuple('BatchPattern', 'f_hourly f_static t_hourly, t_daily coords')
-Coords = namedtuple('Coords', 'lat, lon')
+import warnings
 
+
+# Ignore anticipated PL warnings.
+warnings.filterwarnings('ignore', '.*does not have many workers.*')
+warnings.filterwarnings('ignore', '.*Your `IterableDataset` has `__len__` defined.*')
+
+# We *must* use synchronous scheduler to avoid deadlock.
 dask.config.set(scheduler='synchronous')
+
+
+BatchPattern = namedtuple('BatchPattern', 'f_hourly f_static t_hourly, t_daily coords')
+Coords = namedtuple('Coords', 'lat, lon, chunk')
+
 
 
 class NotEnoughSamplesError(Exception):
@@ -81,6 +91,7 @@ class DataChunk(object):
             features_static: list[str] = [],
             targets_hourly: list[str] = [],
             targets_daily: list[str] = [],
+            chunk_index: int = -1,
             feature_scaling: dict[str, dict[str, float]] = None,
             dtype: str = 'float32',
             disable_shuffling: bool = False,
@@ -99,6 +110,7 @@ class DataChunk(object):
         self.features_static = features_static
         self.targets_hourly = targets_hourly
         self.targets_daily = targets_daily
+        self.chunk_index = chunk_index
 
         self.feature_scaling = feature_scaling
         self.dtype = dtype
@@ -126,7 +138,8 @@ class DataChunk(object):
             ),
             coords=Coords(
                 lat=data_sel.lat.item(),
-                lon=data_sel.lon.item())
+                lon=data_sel.lon.item(),
+                chunk=self.chunk_index)
         )
 
     def get_n_next(self, n: int):
@@ -176,7 +189,7 @@ class QueueFiller(object):
             self,
             data: xr.Dataset,
             mask: xr.DataArray,
-            chunk_mask: xr.DataArray,
+            chunk_coords: xr.DataArray,
             batch_queue: mp.Queue,
             index_queue: mp.Queue,
             batch_size: int,
@@ -196,7 +209,9 @@ class QueueFiller(object):
                 the dimensions `lat` and `lon`.
             mask: a spatio-temporal mask indicating valid pixels (`True`). Must at least have
                 the dimensions `lat` and `lon` equal to `ds`.
-            chunk_mask: a spatio-temporal mask indicating valid chunks (`True`). Must at least have
+            chunk_coords: coordinates corresponding to chunks with any valid samples in them,
+                an array with shape n x 2, each element being a lat, lon coordinate.
+            a spatio-temporal mask indicating valid chunks (`True`). Must at least have
                 the dimensions `lat` and `lon`.
             batch_queue: a multiprocessing.Manager().Queue for queuing of batches.
             index_queue: a multiprocessing.Manager().Queue holding the chunk indices.
@@ -219,7 +234,7 @@ class QueueFiller(object):
 
         self.data = data
         self.mask = mask.load()
-        self.chunk_mask = chunk_mask.load()
+        self.chunk_coords = chunk_coords
         self.batch_queue = batch_queue
         self.index_queue = index_queue
 
@@ -236,9 +251,8 @@ class QueueFiller(object):
         self.dummy_data = dummy_data
 
         self.feature_scaling = self._get_scaling(self.data, self.features_hourly, self.features_static)
-        self.chunk_coords = np.argwhere(self.chunk_mask.values)
-        self.chunk_bounds_lat = self.coords2bounds('lat')
-        self.chunk_bounds_lon = self.coords2bounds('lon')
+        self.chunk_bounds_lat = self.coords2bounds(self.mask, dim='lat', chunk_size=self.chunk_size)
+        self.chunk_bounds_lon = self.coords2bounds(self.mask, dim='lon', chunk_size=self.chunk_size)
 
         self.chunks: list[DataChunk] = []
 
@@ -284,7 +298,8 @@ class QueueFiller(object):
                                     targets_hourly=self.targets_hourly,
                                     feature_scaling=self.feature_scaling,
                                     disable_shuffling=self.disable_shuffling,
-                                    dummy_data=self.dummy_data
+                                    dummy_data=self.dummy_data,
+                                    chunk_index=index
                                 )
                             )
                             continue
@@ -310,8 +325,9 @@ class QueueFiller(object):
         for i in reversed(empty):
             self.chunks.pop(i)
 
-    def coords2bounds(self, dim: str):
-        return np.lib.stride_tricks.sliding_window_view(range(0, len(self.mask[dim]) + 1, self.chunk_size), 2)
+    @staticmethod
+    def coords2bounds(mask: xr.DataArray, dim: str, chunk_size: int):
+        return np.lib.stride_tricks.sliding_window_view(range(0, len(mask[dim]) + 1, chunk_size), 2)
 
     def _distribute_batch(self, n: int, return_all: bool = False) -> list[int]:
         num_left = self.num_left_per_chunk
@@ -349,9 +365,6 @@ class QueueFiller(object):
             min_max.update({var: {'min': data_min, 'max': data_max}})
 
         return min_max
-
-    def coords2bounds(self, dim: str):
-        return np.lib.stride_tricks.sliding_window_view(range(0, len(self.mask[dim]) + 1, self.chunk_size), 2)
 
     @property
     def num_buffered(self) -> int:
@@ -422,6 +435,7 @@ class DataQueue(IterableDataset):
 
         self.num_samples = self.mask.sum().compute().item()
         self.chunk_mask = (self.mask.coarsen(lat=chunk_size, lon=chunk_size).sum() > 0).compute()
+        self.chunk_coords = np.argwhere(self.chunk_mask.values)
 
         self._check_ds(self.data, self.mask)
 
@@ -433,7 +447,7 @@ class DataQueue(IterableDataset):
         queue_filler = QueueFiller(
             data=self.data,
             mask=self.mask,
-            chunk_mask=self.chunk_mask,
+            chunk_coords=self.chunk_coords,
             batch_queue=batch_queue,
             index_queue=index_queue,
             batch_size=self.batch_size,
@@ -462,7 +476,7 @@ class DataQueue(IterableDataset):
             process = mp.Process(target=qf.fill, daemon=True)
             processes.append(process)
 
-        return processes, qf.num_chunks
+        return processes
 
     def __iter__(self):
 
@@ -470,7 +484,7 @@ class DataQueue(IterableDataset):
         batch_queue = manager.Queue(maxsize=self.queue_size)
         index_queue = manager.Queue()
 
-        processes, num_chunks = self.init_queue_fillers(
+        processes = self.init_queue_fillers(
             batch_queue=batch_queue,
             index_queue=index_queue,
             num_processes=self.num_queue_workers
@@ -479,9 +493,9 @@ class DataQueue(IterableDataset):
         with GracefulExit(processes=processes, manager=manager):
 
             if self.disable_shuffling:
-                chunk_ids = np.random.permutation(num_chunks)
+                chunk_ids = np.random.permutation(self.num_chunks)
             else:
-                chunk_ids = np.arange(num_chunks)
+                chunk_ids = np.arange(self.num_chunks)
 
             for i in chunk_ids:
                 index_queue.put(i)
@@ -521,7 +535,10 @@ class DataQueue(IterableDataset):
                 for i in range(len(incomplete_batch.coords.lat)):
                     batch_item = BatchPattern(
                         *[el if el is None else el[i] for el in incomplete_batch[:4]],
-                        coords=Coords(incomplete_batch.coords.lat[i], incomplete_batch.coords.lon[i]))
+                        coords=Coords(
+                            incomplete_batch.coords.lat[i],
+                            incomplete_batch.coords.lon[i],
+                            incomplete_batch.coords.chunk[i]))
                     batch_items.append(batch_item)
                     if len(batch_items) == self.batch_size:
                         batch = batchpattern_collate(batch_items)
@@ -532,15 +549,18 @@ class DataQueue(IterableDataset):
                 batch = batchpattern_collate(batch_items)
                 yield batch
 
-
     def get_dummy_batch(self):
         return BatchPattern(
             f_hourly=torch.randn(self.batch_size, 24, 1000, len(self.features_hourly)) if self.features_hourly else None,
             f_static=torch.randn(self.batch_size, len(self.features_static)) if self.features_static else None,
             t_daily=torch.randn(self.batch_size, 1000, len(self.targets_daily)) if self.targets_daily else None,
             t_hourly=torch.randn(self.batch_size, 24, 1000, len(self.targets_hourly)) if self.targets_hourly else None,
-            coords=Coords(lat=torch.arange(self.batch_size), lon=torch.arange(self.batch_size))
+            coords=Coords(lat=torch.arange(self.batch_size), lon=torch.arange(self.batch_size), chunk=torch.arange(self.batch_size))
         )
+
+    @property
+    def num_chunks(self) -> int:
+        return len(self.chunk_coords)
 
     def _check_ds(
             self,
@@ -606,13 +626,14 @@ class GeoDataQueue(pl.LightningDataModule):
     The dataloaders return data in the format:
     > BatchPattern = namedtuple('BatchPattern', 'f_hourly f_static t_hourly, t_daily coords'),
     The `coords` are formatted as:
-    > Coords = namedtuple('Coords', 'lat, lon')
+    > Coords = namedtuple('Coords', 'lat, lon, chunk')
 
     `f_hourly` are hourly features. They have shape [B, H, D, FH]
     `f_static` are static features. They have shape [B, FS]
     `t_hourly` are hourly targets. They have shape [B, H, D, TH]
     `f_daily` are daily targets. They have shape [B, D, TD]
     `lat`, `lon` are latitudes and longitudes of each samples, they both have shape [B]
+    `chunk` is the chunk id of each samples with shape [B]
 
     * batch_size: B
     * num_hours: H (=24)
@@ -636,6 +657,8 @@ class GeoDataQueue(pl.LightningDataModule):
     def __init__(
             self,
             fold_id: int,
+            target_daily: list[str],
+            hourly_daily: list[str] = [],
             num_folds: int = 6,
             batch_size: int = 50,
             chunk_buffer_size: int = 4,
@@ -650,6 +673,8 @@ class GeoDataQueue(pl.LightningDataModule):
 
         Args:
             fold_id: the fold ID, an integer in the range (0, `num_folds` - 1).
+            target_daily: the daily target(s), a list of strings.
+            target_hourly: the hourly target(s), a list of strings. Not implemented yet, takes no effect.
             num_folds: the number of folds, a positive integer that matches the number of folds
                 in the `fold_mask` (a variable of the dataset). Default is 6.
             batch_size: the batch size, an integer > 0. Default is 50.
@@ -661,9 +686,6 @@ class GeoDataQueue(pl.LightningDataModule):
             num_queue_workers: number of workers that fill batch queue in parallel.
             chunk_size: the latitude/longitude chunk sizes. Must divide the
                 `ds.lat`/`ds.lon` chunk size without remainder.
-            disable_shuffling: if `True` shuffling will be turned off for all dataloaders. By default,
-                shuffling is turned on for all dataloaders. If Pytorch Lightning's overfit
-                features (`pl.Trainer(overfit_batches=n)`) is used, `disable_shuffling=True` is be forced.
             cube_path: the path to the data cube (zarr format).
                 Default is '/Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr'.
             dummy_data: if set to `True`, dummy data is returned and reading from disk is omitted; use for debugging.
@@ -697,12 +719,8 @@ class GeoDataQueue(pl.LightningDataModule):
         self.features_static = [
             'canopyheight', 'rootdepth', 'percent_tree_cover', 'sandfrac', 'topidx', 'wtd'
         ]
-        self.targets_daily = [
-            'fvc'
-        ]
-        self.targets_hourly = [
-            #'lst'
-        ]
+        self.targets_daily = target_daily
+        self.targets_hourly = hourly_daily
 
     @staticmethod
     def get_fold_split(fold_id: int, num_folds: int) -> tuple[list[int], list[int], list[int]]:
@@ -745,34 +763,42 @@ class GeoDataQueue(pl.LightningDataModule):
             del self.test_mask
         elif stage == 'predict':
             del self.predict_mask
+        else:
             raise ValueError(
                 f'`stage`  must be one of \'fit\', \'validate\', \'test\', or \'predict\',  is \'{stage}\'.'
             )
 
     def get_dataloader(self, cvset: str):
+        # The default behavior:
+        chunk_buffer_size = self.chunk_buffer_size
+        num_queue_workers = self.num_queue_workers
+        disable_shuffling = True
+
+        # The cvset-specific behavior:
         if cvset == 'train':
             mask = self.train_mask
-            chunk_buffer_size = self.chunk_buffer_size
+
+            if self.trainer.overfit_batches > 0:
+                num_queue_workers = 1  # For consistent batch.
+            else:
+                disable_shuffling = False  # Only needed for training.
+
         elif cvset == 'valid':
             mask = self.valid_mask
-            chunk_buffer_size = 1
+            chunk_buffer_size = 1  # No randomness needed.
+
         elif cvset == 'test':
             mask = self.test_mask
-            chunk_buffer_size = 1
+            chunk_buffer_size = 1  # No randomness needed.
+
         elif cvset == 'predict':
             mask = self.predict_mask
-            chunk_buffer_size = 1
+            chunk_buffer_size = 1  # No randomness needed.
+
         else:
             raise ValueError(
                 f'`cvset`  must be one of \'train\', \'valid\', \'test\', or \'predict\',  is \'{cvset}\'.'
             )
-
-        if self.trainer.overfit_batches > 0:
-            disable_shuffling = True
-            num_queue_workers = 1
-        else:
-            disable_shuffling = self.disable_shuffling
-            num_queue_workers = self.num_queue_workers
 
         dataqueue = DataQueue(
             data=self.ds,
@@ -792,9 +818,10 @@ class GeoDataQueue(pl.LightningDataModule):
 
         dataloader = DataLoader(
             dataqueue,
-            num_workers=0,  # Cannot be > 0 as we spawn subprocesses in dataqueue.
-            batch_size=None,
-            shuffle=False,  # Do not change, has no impact as we use a custom IterableDataset.
+            # Do not change any of these:
+            num_workers=0,  # Cannot be > 0 as we spawn subprocesses in dataqueue in 'fork' mode.
+            batch_size=None,  # We manually combine batches.
+            shuffle=False,  # Has no impact as we use a custom IterableDataset.
             **self.dataloader_kwargs)
 
         return dataloader
@@ -830,3 +857,7 @@ class GeoDataQueue(pl.LightningDataModule):
     @property
     def num_targets_hourly(self) -> int:
         return len(self.targets_hourly)
+
+    @property
+    def targets(self) -> list[str]:
+        return self.targets_daily + self.targets_hourly
