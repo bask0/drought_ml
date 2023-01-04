@@ -488,9 +488,9 @@ class DataQueue(IterableDataset):
         with GracefulExit(processes=processes, manager=manager):
 
             if self.disable_shuffling:
-                chunk_ids = np.random.permutation(self.num_chunks)
-            else:
                 chunk_ids = np.arange(self.num_chunks)
+            else:
+                chunk_ids = np.random.permutation(self.num_chunks)
 
             for i in chunk_ids:
                 index_queue.put(i)
