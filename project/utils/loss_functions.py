@@ -3,6 +3,7 @@
 import torch
 from torch import nn
 from torch import Tensor
+import math
 
 
 class BetaNLLLoss(nn.Module):
@@ -63,7 +64,7 @@ class BetaNLLLoss(nn.Module):
             Loss per batch element of shape B
         """
 
-        loss = 0.5 * ((target - mean) ** 2 / variance + variance.log())
+        loss = nn.functional.gaussian_nll_loss(input=mean, target=target, variance=variance, full=True, reduction='none')
 
         if self.beta > 0.0:
             loss = loss * variance.detach() ** self.beta
