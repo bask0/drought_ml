@@ -24,7 +24,7 @@ declare -p FILES | sed 's/ -[aA]/&g/' > files_array
 
 if [ $ARRNUMFILES -ge 0 ]
 then
-    sbatch --wait --array=0-$ARRNUMFILES%20 preprocessing/cube_add_file.sbatch
+    sbatch --wait --array=0-$ARRNUMFILES%20 --partition=big preprocessing/cube_add_file.sbatch
 else
     echo ">>> No files to process"
 fi

@@ -1,0 +1,12 @@
+data:
+  chunk_buffer_size: 1
+  num_queue_workers: 1
+  batch_size: 5
+trainer:
+  overfit_batches: 1
+  log_every_n_steps: 1
+  min_epochs: 499
+  max_epochs: 500
+  limit_train_batches: 1
+  limit_val_batches: 1
+  limit_predict_batches: 1

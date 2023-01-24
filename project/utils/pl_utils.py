@@ -5,19 +5,18 @@ import os
 import shutil
 import numpy as np
 import torch.multiprocessing as mp
+from torch import Tensor
 from collections import namedtuple
 from typing import Any, Sequence
 
 from dataset import QueueFiller
-
-ReturnPattern = namedtuple('ReturnPattern', 'mean_hat var_hat coords')
+from utils.types import ReturnPattern
 
 
 class OutputWriter(BasePredictionWriter):
     """Output writer to use as callback in prediction mode."""
     def __init__(
             self,
-            targets: str | list[str],
             overwrite: bool | str = True) -> None:
         """Initialize OutputWriter.
 
@@ -29,22 +28,24 @@ class OutputWriter(BasePredictionWriter):
         - '<target>_vhat' (optional variance)
 
         Example:
-        >>> pred_writer = OutputWriter(output_dir=['fvc'])
+        >>> pred_writer = OutputWriter()
         >>> trainer = Trainer(callbacks=[pred_writer])
         >>> model = MyModel()
         >>> trainer.predict(model, return_predictions=False)
 
         Args:
-            targets: list of target variables.
             overwrite: if `True` (default), existing predictions are overridden. Else, an error
                 is raised if the target exists.
         """
         super().__init__(write_interval='batch')
 
-        self.targets = [targets] if isinstance(targets, str) else targets
         self.overwrite = overwrite
 
-        self.zarr_file: str | None = None
+        self.targets: list[str] = None
+        self.zarr_file: xr.Dataset | None = None
+        self.mask: xr.DataArray | None = None
+        self.chunk_coords: np.typing.ArrayLike | None = None
+        self.num_year_samples: int = None
 
         self.processes: list[mp.Process] = []
         self.chunks = {}
@@ -61,7 +62,7 @@ class OutputWriter(BasePredictionWriter):
 
         if self.zarr_file is None:
             self.has_variance = prediction.var_hat is not None
-            self.zarr_file, self.mask, self.chunk_coords, chunk_size = self.init_zarr(
+            chunk_size = self.init_zarr(
                 trainer=trainer, dataloader_idx=dataloader_idx, has_variance=self.has_variance)
             self.chunk_bounds_lat = QueueFiller.coords2bounds(self.mask, dim='lat', chunk_size=chunk_size)
             self.chunk_bounds_lon = QueueFiller.coords2bounds(self.mask, dim='lon', chunk_size=chunk_size)
@@ -85,7 +86,7 @@ class OutputWriter(BasePredictionWriter):
 
                 self.chunks[chunk_id] = {
                     'ds': chunk_ds,
-                    'num_samples': num_samples,
+                    'num_samples': num_samples * self.num_year_samples,
                     'num_saved': 0,
                     'lat_bounds': lat_bounds,
                     'lon_bounds': lon_bounds
@@ -94,12 +95,20 @@ class OutputWriter(BasePredictionWriter):
             for target_i, target in enumerate(self.targets):
                 self.chunks[chunk_id]['ds'][
                     self.get_target_pred_name(name=target, is_variance=False)
-                ].loc[{'lat': i_pred.coords.lat, 'lon': i_pred.coords.lon}] = i_pred.mean_hat[..., target_i]
+                ].loc[{
+                    'lat': i_pred.coords.lat,
+                    'lon': i_pred.coords.lon,
+                    'time': slice(i_pred.coords.window_start, i_pred.coords.window_end)}] =\
+                            i_pred.mean_hat[-i_pred.coords.num_days:, ..., target_i]
 
                 if self.has_variance:
                     self.chunks[chunk_id]['ds'][
                         self.get_target_pred_name(name=target, is_variance=True)
-                    ].loc[{'lat': i_pred.coords.lat, 'lon': i_pred.coords.lon}] = i_pred.var_hat[..., target_i]
+                    ].loc[{
+                        'lat': i_pred.coords.lat,
+                        'lon': i_pred.coords.lon,
+                        'time': i_pred.coords.time_slice}] =\
+                            i_pred.var_hat[-i_pred.coords.num_days:, ..., target_i]
 
             self.chunks[chunk_id]['num_saved'] += 1
 
@@ -121,6 +130,17 @@ class OutputWriter(BasePredictionWriter):
                     process.terminate()
                     process.join()
 
+    def on_predict_epoch_end(
+            self,
+            trainer: pl.Trainer,
+            pl_module: pl.LightningModule,
+            outputs: Sequence[Any]) -> None:
+
+        for chunk in self.chunks.values():
+            self.write_chunk(chunk)
+
+        self.chunks = {}
+
     def write_chunk(self, chunk: dict) -> None:
         chunk_ds = chunk['ds'].drop_vars(['time'])
 
@@ -132,7 +152,7 @@ class OutputWriter(BasePredictionWriter):
     def init_zarr(
             self, trainer: 'pl.Trainer',
             dataloader_idx: int,
-            has_variance: bool) -> tuple[xr.Dataset, xr.DataArray, np.typing.ArrayLike, int]:
+            has_variance: bool) -> tuple[str, xr.Dataset, xr.DataArray, np.typing.ArrayLike, int]:
 
         zarr_dir = os.path.join(trainer.log_dir, 'predictions.zarr')
 
@@ -162,7 +182,13 @@ class OutputWriter(BasePredictionWriter):
         dummy = self.get_target_like(data, has_variance=has_variance, use_orig_name=True)
         dummy.to_zarr(zarr_dir, compute=False)
 
-        return xr.open_zarr(zarr_dir), dataset.mask, dataset.chunk_coords, dataset.chunk_size
+        self.targets = dataset.targets
+        self.zarr_file = xr.open_zarr(zarr_dir)
+        self.mask = dataset.mask
+        self.chunk_coords = dataset.chunk_coords
+        self.num_year_samples = dataset.num_year_samples
+
+        return dataset.chunk_size
 
     def get_target_like(self, data: xr.Dataset, has_variance: bool, use_orig_name: bool) -> xr.Dataset:
         dummy = xr.Dataset()
@@ -189,7 +215,7 @@ class OutputWriter(BasePredictionWriter):
                 hasattr(obj, '_fields')
         )
 
-    def subset_namedtuple(self, x: namedtuple, ind: int) -> namedtuple:
+    def subset_namedtuple(self, x: Any, ind: int) -> namedtuple:
         el_type = type(x)
 
         el_list = []
@@ -200,10 +226,19 @@ class OutputWriter(BasePredictionWriter):
                 el_subset = None
             else:
                 el_subset = el[ind]
-                if el_subset.ndim == 0:
+                if isinstance(el_subset, str):
+                    # For dates in string format.
+                    pass
+                elif el_subset.ndim == 0:
+                    # For numpy floats and integers.
                     el_subset = el_subset.item()
-                else:
+                elif isinstance(el_subset, Tensor):
+                    # For Tensors.
                     el_subset = el_subset.cpu().numpy()
+                else:
+                    raise TypeError(
+                        '`el_subset` is neither a string, a float, an integer, nor a Tensor.'
+                    )
 
             el_list.append(el_subset)
 

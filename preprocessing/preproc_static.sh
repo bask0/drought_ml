@@ -59,7 +59,7 @@ elif [ "$var" = "tc" ]; then
     #     -ensmedian ${PREPROC_DIR}/tmp.${var}.*.nc \
     #     ${PREPROC_DIR}/${var}.static.1460.1140.nc
 
-    # rm ${PREPROC_DIR}/tmp.*.nc
+    rm ${PREPROC_DIR}/tmp.*.nc
 
     exit 0
 

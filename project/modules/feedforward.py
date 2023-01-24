@@ -106,7 +106,7 @@ class FeedForward(nn.Module):
         self.layer_out = FeedForwardBlock(
             num_inputs=num_hidden,
             num_outputs=num_outputs,
-            dropout=dropout_last,
+            dropout=dropout if dropout_last else 0.0,
             activation=activation_last,
         )
 

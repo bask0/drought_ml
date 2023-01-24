@@ -5,7 +5,7 @@ from torch import Tensor
 from project.pl_models.base_model import LightningNet
 from modules.tcn import TemporalConvNet
 from modules.feedforward import FeedForward
-from utils.torch_utils import Transform
+from utils.torch_utils import Transform, EncodeHourlyToDaily
 
 
 class TemporalConvNetPL(LightningNet):
@@ -19,7 +19,9 @@ class TemporalConvNetPL(LightningNet):
             dropout: float,
             static_dropout: float,
             kernel_size: int = 4,
+            num_meteo_enc: int = 10,
             num_geofactors_enc: int = 6,
+            predict_var: bool = False,
             **kwargs) -> None:
         """Implements a Temporal Convolutional Network (TCN).
 
@@ -51,8 +53,12 @@ class TemporalConvNetPL(LightningNet):
                 The kernel size. Defaults to 4.
             activation:
                 The activation function, defaults to 'relu'.
+            num_meteo_enc:
+                The meteorology encoding dimensionality.
             num_geofactors_enc:
                 The geofactor encoding dimensionality.
+            predict_var:
+                Whether to predict uncertainty, default is False.
             **kwargs:
                 Are passed to the parent class `LightningNet`.
 
@@ -60,22 +66,29 @@ class TemporalConvNetPL(LightningNet):
 
         super().__init__(**kwargs)
 
+        self.predict_var = predict_var
+
         self.encode_static = FeedForward(
             num_inputs=num_geofactors,
             num_outputs=num_geofactors_enc,
             num_hidden=32,
             num_layers=2,
             dropout=static_dropout,
-            activation='relu',
+            activation='softplus',
             activation_last='tanh',
             dropout_last=False
         )
 
-        self.flatten_time = Transform(transform_fun=lambda x: x.view(x.shape[0], -1, x.shape[-1]))
-        self.to_sequence_last = Transform(transform_fun=lambda x: x.permute(0, 2, 1))
+        self.encode_hourly = EncodeHourlyToDaily(
+            num_inputs=num_inputs,
+            num_hidden=num_hidden,
+            num_encoding=num_meteo_enc,
+            dropout=dropout,
+            outpout_channel_last=False
+        )
 
         self.tcn = TemporalConvNet(
-            num_inputs=num_inputs,
+            num_inputs=num_meteo_enc,
             num_static_inputs=num_geofactors_enc,
             num_outputs=-1,
             num_hidden=num_hidden,
@@ -84,36 +97,27 @@ class TemporalConvNetPL(LightningNet):
             dropout=dropout
         )
 
-        self.tcn_mean = TemporalConvNet(
-            num_inputs=num_hidden,
-            num_static_inputs=num_geofactors_enc,
-            num_outputs=num_outputs,
-            num_hidden=num_hidden,
-            kernel_size=kernel_size,
-            num_layers=1,
-            dropout=dropout
+        self.mean_output_layer = nn.Sequential(
+            nn.Conv1d(
+                in_channels=num_hidden,
+                out_channels=num_outputs,
+                kernel_size=1
+            ),
+            Transform(transform_fun=lambda x: x.transpose(1, 2))
         )
 
-        self.tcn_var = TemporalConvNet(
-            num_inputs=num_hidden,
-            num_static_inputs=num_geofactors_enc,
-            num_outputs=num_outputs,
-            num_hidden=num_hidden,
-            kernel_size=kernel_size,
-            num_layers=1,
-            dropout=dropout
-        )
+        if self.predict_var:
+            self.var_output_layer = nn.Sequential(
+                nn.Conv1d(
+                    in_channels=num_hidden,
+                    out_channels=num_outputs,
+                    kernel_size=1
+                ),
+                nn.Softplus(),
+                Transform(transform_fun=lambda x: x.transpose(1, 2))
+            )
 
-        self.downscale = nn.Conv1d(
-            in_channels=num_outputs,
-            out_channels=1,
-            kernel_size=24,
-            stride=24)
-
-        self.mean_act = nn.Identity()
-        self.var_act = nn.Softplus()
-
-        self.to_channel_last = Transform(transform_fun=lambda x: x.permute(0, 2, 1))
+        self.to_channel_last = Transform(transform_fun=lambda x: x.transpose(1, 2))
 
         self.save_hyperparameters()
 
@@ -132,23 +136,19 @@ class TemporalConvNetPL(LightningNet):
             #  (B, FS) -> (B, FS*)
             s = self.encode_static(s)
 
-        # (B, H, S, FH) -> (B, HxS, FH)
-        out = self.flatten_time(x)
-        # (B, HxS, FH) -> (B, FH, HxS)
-        out = self.to_sequence_last(out)
-        # (B, FH, HxS), (B, FS*) -> (B, D, HxS)
+        # (B, H, S, FH) -> (B, S, FD*)
+        out = self.encode_hourly(x)
+
+        # (B, S, FD*), (B, FS*) -> (B, D, S)
         out = self.tcn(out, s)
 
-        # (B, D, HxS) -> (B, D, HxS)
-        out_mean = self.tcn_mean(out, s)
-        out_var = self.tcn_var(out, s)
+        # (B, D, S) -> (B, S, O)
+        out_mean = self.mean_output_layer(out)
 
-        # (B, D, HxS) -> (B, O, S)
-        out_mean = self.downscale(out_mean)
-        out_var = self.downscale(out_var)
-
-        # (B, O, S) -> (B, S, O)
-        out_mean = self.mean_act(self.to_channel_last(out_mean))
-        out_var = self.var_act(self.to_channel_last(out_var))
+        if self.predict_var:
+            # (B, D, S) -> (B, S, O)
+            out_var = self.var_output_layer(out)
+        else:
+            out_var = None
 
         return out_mean, out_var

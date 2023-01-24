@@ -4,37 +4,41 @@ import torch
 from torch import nn
 from torch import Tensor
 import math
+import logging
+
+logger = logging.getLogger('pytorch_lightning')
 
 
 class BetaNLLLoss(nn.Module):
-    r"""Creates beta-NLL criterion
-
-    The beta-NLL criterion extends the standard Gaussian NLL criterion. The beta
-    parameter specifies a weight fo the errors from 0 to 1, 0 yielding standard NLL
-    criterion, and 1 weighing as in MSE (but still with uncertainty). This solves a
-    problem with standard NLL, which tends to emphasize regions with low variance
-    during trainging. See https://arxiv.org/pdf/2203.09168.pdf
-
-    Notes:
-        When beta is set to 0, this loss is equivalent to the NLL loss. Beta of 1 corresponds
-        to equal weighting of low and high error points.
-
-    Args:
-        reduction: Specifies the reduction to apply to the output:
-            ``'none'`` | ``'mean'`` | ``'sum'``. ``'none'``: no reduction will be applied,
-            ``'mean'``: the sum of the output will be divided by the number of
-            elements in the output, ``'sum'``: the output will be summed. Default: ``'mean'``
-        beta: Specifies the weighting of errors. 0 means standard NLL is used, while 1 means that
-            they are weighted equally as in MSE. The paper suggests a value of 0.5 (default).
-
-    Shape:
-        - mean: (batch_size, ...).
-        - variance: (batch_size, ...), same shape as the mean.
-        - target: (batch_size, ...), same shape as the mean.
-        - output: scalar, or, if `reduction` is ``'none'``, then (batch_size, ...), same shape as the input.
-    """
 
     def __init__(self, reduction: str = 'mean', beta: float = 0.5) -> None:
+        r"""Creates beta-NLL criterion
+
+        The beta-NLL criterion extends the standard Gaussian NLL criterion. The beta
+        parameter specifies a weight fo the errors from 0 to 1, 0 yielding standard NLL
+        criterion, and 1 weighing as in MSE (but still with uncertainty). This solves a
+        problem with standard NLL, which tends to emphasize regions with low variance
+        during trainging. See https://arxiv.org/pdf/2203.09168.pdf
+
+        Notes:
+            When beta is set to 0, this loss is equivalent to the NLL loss. Beta of 1 corresponds
+            to equal weighting of low and high error points.
+
+        Args:
+            reduction: Specifies the reduction to apply to the output:
+                ``'none'`` | ``'mean'`` | ``'sum'``. ``'none'``: no reduction will be applied,
+                ``'mean'``: the sum of the output will be divided by the number of
+                elements in the output, ``'sum'``: the output will be summed. Default: ``'mean'``
+            beta: Parameter from range [0, 1] controlling relative weighting between data points,
+                where `0` corresponds to high weight on low error points and `1` to an equal weighting.
+                The default, 0.5, has been reported to work best in general.
+
+        Shape:
+            - mean: (batch_size, ...).
+            - variance: (batch_size, ...), same shape as the mean.
+            - target: (batch_size, ...), same shape as the mean.
+            - output: scalar, or, if `reduction` is ``'none'``, then (batch_size, ...), same shape as the input.
+        """
         super().__init__()
 
         if reduction not in ('none', 'mean', 'sum'):
@@ -44,29 +48,55 @@ class BetaNLLLoss(nn.Module):
 
         if not (0 <= beta <= 1):
             raise ValueError(
-                f'`beta` must be a value in the range (0, 1), is {beta}.'
+                f'`beta` must be a value in the range [0, 1], is {beta}.'
             )
 
         self.reduction = reduction
         self.beta = beta
 
-    def forward(self, mean: Tensor, variance: Tensor, target: Tensor) -> Tensor:
+        self._FILL_NLL = None
+        self._FILL_BETA = None
+
+    def forward(
+            self,
+            mean: Tensor,
+            variance: Tensor,
+            target: Tensor,
+            mask: Tensor | None = None) -> Tensor:
         """Compute beta-NLL loss (https://arxiv.org/pdf/2203.09168.pdf)
 
         Args:
             mean: Predicted mean of shape B x D
             variance: Predicted variance of shape B x D
             target: Target of shape B x D
-            beta: Parameter from range [0, 1] controlling relative weighting between data points,
-                where `0` corresponds to high weight on low error points and `1` to an equal weighting.
+            mask: A mask indicating valid (i.e., finite and non-NaN) elements in the `target`.
+                `None` (default), implies that no missing values are present in `target`.
 
         Returns:
             Loss per batch element of shape B
         """
 
-        loss = nn.functional.gaussian_nll_loss(input=mean, target=target, variance=variance, full=True, reduction='none')
+        # This value replaces NaN in the variance, yields aproximately 0 from gaussian_nll_loss.
+        if self._FILL_NLL is None:
+            self._FILL_NLL = torch.tensor(1 / (2 * math.pi), requires_grad=False, device=mean.device, dtype=mean.dtype)
+        # This value replaces NaN in the variance, yields 0 from beta weighing.
+        if self._FILL_BETA is None:
+            self._FILL_BETA = torch.tensor(0.0, requires_grad=False, device=mean.device, dtype=mean.dtype)
+
+        if mask is not None:
+            variance = variance.where(mask, self._FILL_NLL)
+
+        loss = nn.functional.gaussian_nll_loss(
+            input=mean,
+            target=target,
+            var=variance,
+            full=True,
+            reduction='none'
+        )
 
         if self.beta > 0.0:
+            if mask is not None:
+                variance = variance.where(mask, self._FILL_BETA)
             loss = loss * variance.detach() ** self.beta
 
         if self.reduction == 'mean':
@@ -111,7 +141,7 @@ class RegressionLoss(nn.Module):
     * input: (N, *), where * means, any number of additional dimensions
     * target: (N, *), same shape as the input
     """
-    def __init__(self, criterion: str = 'l1', sample_wise: bool = True, beta: float = None) -> None:
+    def __init__(self, criterion: str = 'l1', sample_wise: bool = True, beta: float = 0.5) -> None:
         """Initialize RegressionLoss.
         
         Args:
@@ -125,10 +155,9 @@ class RegressionLoss(nn.Module):
                 calculate the loss across all elements. The former weights each batch element equally,
                 the latter weights each observation equally. This is relevant especially with many NaN
                 in the target tensor, while there is no difference without NaN.
-            beta: Parameter from range [0, 1] controlling relative weighting between data points with
-                the ``'betanll'`` criterion, where `0` corresponds to high weight on low error points
-                and `1` to an equal weighting. A value of 0.5 has been reported to work best in general.
-                This parameter must be set with `criterion`=``'betanll'``, but cannot be set with other modes.
+            beta: Parameter for betanll locriterions in range [0, 1] controlling relative weighting between data points
+                with the ``'betanll'`` criterion, where `0` corresponds to high weight on low error points
+                and `1` to an equal weighting. A value of 0.5 (default) has been reported to work best in general.
 
         """
 
@@ -141,25 +170,21 @@ class RegressionLoss(nn.Module):
                 f'argument `criterion` must be one of (\'l1\' | \'l2\', | \'huber\' | \'betanll\'), is \'{criterion}\`.'
             )
 
-        if criterion == 'betanll':
-            if beta is None:
-                raise ValueError(
-                    'parameter `beta` required with `criterion`=\'betanll\'.'
-                )
-        else:
-            if beta is not None:
-                raise ValueError(
-                    f'parameter `beta` cannot be passed with `criterion`=\'{criterion}\'.'
-                )
-
         self.criterion = criterion
         self.sample_wise = sample_wise
+
+        loss_fn_args = dict(reduction='none')
+        if self.criterion == 'batanll':
+            loss_fn_args.update(dict(beta=beta))
+        elif self.criterion == 'huber':
+            loss_fn_args.update(dict(delta=0.3))
+
         self.loss_fn = {
             'l1': nn.L1Loss,
             'l2': nn.MSELoss,
             'huber': nn.HuberLoss,
             'betanll': BetaNLLLoss,
-        }[self.criterion](reduction='none')
+        }[self.criterion](**loss_fn_args)
 
     def forward(self, input: Tensor, target: Tensor, variance: Tensor | None = None) -> Tensor:
         """Forward call, calculate loss from input and target, must have same shape.
@@ -184,14 +209,13 @@ class RegressionLoss(nn.Module):
                 raise ValueError(
                     f'argument `variance` not allowed with `criterion`=\'{self.criterion}\'.'
                 )
+
         mask = target.isfinite()
         # By setting target to input for NaNs, we set gradients to zero.
         target = target.where(mask, input)
 
         if self.criterion == 'betanll':
-            # By setting variance to a large value for NaNs, we set gradients to (almost) zero.
-            variance = variance.where(mask, torch.tensor(1e30, dtype=variance.dtype, device=variance.device))
-            element_error = self.loss_fn(mean=input, variance=variance, target=target)
+            element_error = self.loss_fn(mean=input, variance=variance, target=target, mask=mask)
         else:
             element_error = self.loss_fn(input, target)
 

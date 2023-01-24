@@ -1,20 +1,19 @@
 
 import pytorch_lightning as pl
+from pytorch_lightning.utilities.model_summary import ModelSummary
 import logging
-from torch import Tensor, optim
+from torch import Tensor
 import numpy as np
-from collections import namedtuple
-
+import matplotlib.pyplot as plt
 import warnings
-from typing import Any, Union
+import os
 
 from project.utils.loss_functions import RegressionLoss
+from utils.types import ReturnPattern
 from project.dataset import BatchPattern
 
 # Ignore anticipated PL warnings.
 warnings.filterwarnings('ignore', '.*infer the indices fetched for your dataloader.*')
-
-ReturnPattern = namedtuple('ReturnPattern', 'mean_hat var_hat coords')
 
 logger = logging.getLogger('lightning')
 
@@ -23,11 +22,7 @@ class LightningNet(pl.LightningModule):
     """Implements basic training routine."""
     def __init__(
             self,
-            tasks: list[str],
-            lr: float,
-            weight_decay: float,
-            max_epochs: int = -1,
-            use_mt_weighting: Union[bool, str] = False,
+            use_mt_weighting: bool | str | None = False,
             use_n_last: int = 365 + 366,
             **kwargs) -> None:
         """Standard lightning module, should be subclassed.
@@ -47,28 +42,18 @@ class LightningNet(pl.LightningModule):
             where B=batch size, L=sequence length, F=number of sequence features.
 
         Args:
-            tasks (list[str]): the tasks (target variables).
-            lr (float): the learning rate, >0.0.
-            weight_decay (float): weight decay (L2 regulatizatiuon), >0.0.
-            max_epochs (int): the maximum number of epochs. Depreciated, do not used.
-            use_mt_weighting (Union[bool, str]): whether to use multitask weightig. Default is `False`.
+            use_mt_weighting: whether to use multitask weightig. Default is `False`.
                 Note that the option to pass a string is currently required due to wandb sweeps.
-            num_warmup_batches (Union[int, str], optional): the number of warmup steps. Does not apply to all
+            num_warmup_batches: the number of warmup steps. Does not apply to all
                 schedulers (cyclic and onecycle do start at low lr anyway). No warmup is done if `0`, one full
                 epoch (gradually increasing per batch) if `auto`. Defaults to `auto`.
-            use_n_last (int): use `use_n_last` elements of sequence to calculate the loss. Defaults to 366 * 24.
+            use_n_last: use `use_n_last` elements of sequence to calculate the loss. Defaults to 366 * 24.
                 This asserts a minimum temporal context length even for the first target sequence element.
             kwargs:
                 Do not use kwargs, required as sink for exceeding arguments due to pytorch ligthning's agrparse scheme.
         """
 
         super().__init__()
-
-        self.lr = lr
-        self.weight_decay = weight_decay
-        self.max_epochs = max_epochs
-
-        self.tasks = tasks
 
         if isinstance(use_mt_weighting, str):
             if use_mt_weighting.lower() == 'true':
@@ -89,8 +74,9 @@ class LightningNet(pl.LightningModule):
         self.use_n_last = use_n_last
 
         self.loss_nan_counter = 0
+        self.acc_loss = 0.0
 
-        self.loss_fn = RegressionLoss('betanll', sample_wise=False, beta=0.5)
+        self.loss_fn = RegressionLoss('l1', sample_wise=False, beta=0.5)
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -128,7 +114,8 @@ class LightningNet(pl.LightningModule):
     def shared_step(
             self,
             batch: BatchPattern,
-            step_type: str) -> tuple[Tensor, ReturnPattern]:
+            step_type: str,
+            batch_idx: int) -> tuple[Tensor, ReturnPattern]:
         """A single training step shared across specialized steps that returns the loss and the predictions.
 
         Args:
@@ -146,16 +133,43 @@ class LightningNet(pl.LightningModule):
 
         # 1-ahead prediction, thus targets are shifted.
         loss = self.loss_fn(
-            input=y_mean_hat[:, self.use_n_last:-1, :],
-            variance=y_var_hat[:, self.use_n_last:-1, :],
-            target=batch.t_daily[:, self.use_n_last+1:, :]
+            input=y_mean_hat,
+            # variance=y_var_hat[:, self.use_n_last:-1, :],
+            target=batch.t_daily
         )
 
-        batch_size = y_mean_hat.shape[0]
-        if step_type != 'pred':
-            self.log(f'{step_type}_loss', loss, on_step=step_type=='train', on_epoch=True, batch_size=batch_size)
+        preds = ReturnPattern(mean_hat=y_mean_hat, var_hat=y_var_hat, coords=batch.coords)
 
-        return loss, ReturnPattern(mean_hat=y_mean_hat, var_hat=y_var_hat, coords=batch.coords)
+        batch_size = y_mean_hat.shape[0]
+
+        if step_type == 'train':
+            self.acc_loss += loss
+            if batch_idx % self.trainer.accumulate_grad_batches == 0 and batch_idx != 0:
+                self.acc_loss = self.acc_loss / self.trainer.accumulate_grad_batches
+                self.log(
+                    name='train_loss',
+                    value=self.acc_loss,
+                    on_step=True,
+                    on_epoch=True,
+                    batch_size=batch_size
+                )
+                self.acc_loss = 0.0
+
+            if batch_idx % 100 == 0:
+                self.log_img('train_preds', batch, preds)
+
+        elif step_type in ('val', 'test'):
+            self.log(
+                name=f'{step_type}_loss',
+                value=loss,
+                on_step=False,
+                on_epoch=True,
+                batch_size=batch_size)
+
+            if step_type == 'val' and batch_idx == 0:
+                self.log_img('val_preds', batch, preds)
+
+        return loss, preds
 
     def training_step(
             self,
@@ -171,7 +185,7 @@ class LightningNet(pl.LightningModule):
             Tensor: The batch loss.
         """
 
-        loss, _ = self.shared_step(batch, step_type='train')
+        loss, _ = self.shared_step(batch, step_type='train', batch_idx=batch_idx)
 
         # If loss is NaN or None (see MTloss), try 3 times with new batch.
         if loss is None:
@@ -200,7 +214,7 @@ class LightningNet(pl.LightningModule):
 
         """
 
-        loss, _ = self.shared_step(batch, step_type='val')
+        loss, _ = self.shared_step(batch, step_type='val', batch_idx=batch_idx)
 
         return {'val_loss': loss}
 
@@ -216,7 +230,7 @@ class LightningNet(pl.LightningModule):
 
         """
 
-        loss, _ = self.shared_step(batch, step_type='test')
+        loss, _ = self.shared_step(batch, step_type='test', batch_idx=batch_idx)
 
         return {'test_loss': loss}
 
@@ -233,21 +247,70 @@ class LightningNet(pl.LightningModule):
 
         """
 
-        _, preds = self.shared_step(batch, step_type='pred')
+        _, preds = self.shared_step(batch, step_type='pred', batch_idx=batch_idx)
 
         return preds
 
-    def configure_optimizers(self) -> optim.Optimizer:
-        """Returns an optimizer configuration.
+    def on_train_start(self) -> None:
 
-        Returns:
-            The optimizer.
-        """
+        os.makedirs(self.logger.log_dir, exist_ok=True)
+        with open(os.path.join(self.logger.log_dir, 'model_summary.txt'), 'w') as f:
+            f.write(str(self))
 
-        optimizer = optim.AdamW(
-            self.parameters(),
-            lr=self.lr,
-            weight_decay=self.weight_decay
-        )
+        return super().on_train_start()
 
-        return optimizer
+    def plot_preds(self, batch: BatchPattern, preds: ReturnPattern):
+
+        num_daily = batch.t_daily.shape[-1]
+
+        fig, axes = plt.subplots(num_daily, 1, figsize=(8, num_daily), dpi=180, sharex=True, squeeze=False)
+
+        for t in range(num_daily):
+            obs = batch.t_daily[0, :, t].cpu()
+            pred = preds.mean_hat[0, :, t].detach().cpu()
+            t_range = range(len(obs))
+
+            ax = axes[t, 0]
+
+            if preds.var_hat is not None:
+                var = preds.var_hat[0, :, t].detach().cpu()
+                ax.fill_between(
+                    t_range,
+                    pred - var,
+                    pred + var,
+                    alpha=0.2,
+                    color='k',
+                    label='var'
+                )
+
+            obs_min = np.nanmin(obs)
+            obs_max = np.nanmax(obs)
+            extra_space = (obs_max - obs_max) * 0.2
+            obs_min -= extra_space
+            obs_max += extra_space
+
+            ax.set_ylim(obs_min, obs_max)
+
+            ax.plot(t_range, pred, color='k', lw=0.8, label='pred')
+            ax.plot(t_range, obs, color='tab:red', lw=0.5, label='obs', alpha=0.8)
+
+        for ax in axes[:, 0]:
+            ax.spines[['right', 'top', 'bottom']].set_visible(False)
+            ax.axes.get_xaxis().set_visible(False)
+
+        axes[0, 0].legend(loc=2)
+        plt.tight_layout()
+
+        return fig
+
+    def log_img(self, name: str, batch: BatchPattern, preds: ReturnPattern):
+        tensorboard = self.logger.experiment
+        tensorboard.add_figure(name, self.plot_preds(batch, preds), self.trainer.global_step, close=True)
+
+    def __repr__(self) -> str:
+        s = f'=== Summary {"=" * 31}\n'
+        s += f'{str(ModelSummary(self))}\n\n'
+        s += f'=== Model {"=" * 33}\n'
+        s += f'{str(self)}'
+
+        return s

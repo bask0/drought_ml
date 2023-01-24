@@ -655,6 +655,91 @@ class DropVal(nn.Module):
         return out
 
 
+class EncodeHourlyToDaily(nn.Module):
+    """Encode hourly time-series diurnal cycle (format batch x time x hour x num_inputs)."""
+    def __init__(
+            self,
+            num_inputs: int,
+            num_hidden: int,
+            num_encoding: int,
+            dropout: float,
+            outpout_channel_last: bool
+        ):
+        """Initialize EncodeHourly class.
+
+        Shapes:
+            x: batch x time  hour x num_inputs
+            output:
+                outpout_channel_last=True:
+                    batch x time x num_hidden
+                outpout_channel_last=False:
+                    batch x num_hidden, time
+
+        Args:
+            num_inputs: the input dimensioanlity (last dimension, the features).
+            num_hidden: the model dimensionality, also the output size.
+            num_encoding: the output encoding size. The hour and feature dimension are reduced to this size.
+            dropout: random dropout, a value in range [0 1).
+            outpout_channel_last: whether to move the channel dimension (the encoding vector) of the
+                output to the last dimension.
+
+        Returns:
+            A tensor.
+        """
+        super().__init__()
+
+        self.to_seq_last = Transform(transform_fun=lambda x: x.permute(0, 3, 1, 2)) 
+
+        self.conv0 = nn.Conv2d(in_channels=num_inputs, out_channels=num_hidden, kernel_size=(1, 5,), padding='valid')
+        self.avg0 = nn.AvgPool2d(kernel_size=(1, 2,))
+        self.act0 = nn.Softplus()
+        self.dropout0 = nn.Dropout(dropout)
+
+        self.conv1 = nn.Conv2d(in_channels=num_hidden, out_channels=num_hidden, kernel_size=(1, 3,), padding='valid')
+        self.avg1 = nn.AvgPool2d(kernel_size=(1, 2,))
+        self.act1 = nn.Softplus()
+        self.dropout1 = nn.Dropout(dropout)
+
+        self.to_encoding = Transform(transform_fun=lambda x: x.transpose(2, 3).flatten(start_dim=1, end_dim=2))
+
+        self.conv2 = nn.Conv1d(in_channels=num_hidden * 4, out_channels=num_encoding, kernel_size=1)
+
+        self.outpout_channel_last = outpout_channel_last
+        if self.outpout_channel_last:
+            self.to_channels_last = Transform(transform_fun=lambda x: x.transpose(1, 2))
+
+    def forward(self, x: Tensor) -> Tensor:
+
+        # (B, S, H=24, F) -> (B, F, S, H)
+        out = self.to_seq_last(x)
+
+        # (B, F, S, H) -> (B, D, S, 20)
+        out = self.conv0(out)
+        # (B, D, S, 20) -> (B, D, S, 10)
+        out = self.avg0(out)
+        out = self.act0(out)
+        out = self.dropout0(out)
+
+        # (B, D, S, 10) -> (B, D, S, 8)
+        out = self.conv1(out)
+        # (B, D, S, 8) -> (B, D, S, 4)
+        out = self.avg1(out)
+        out = self.act1(out)
+        out = self.dropout1(out)
+
+        # (B, D, S, 4) -> (B, D * 4, D)
+        out = self.to_encoding(out)
+
+        # (B, D * 4, D) -> (B, O, S)
+        out = self.conv2(out)
+
+        if self.outpout_channel_last:
+            # (B, O, S) -> (B, S, O)
+            out = self.to_channels_last(out)
+
+        return out
+
+
 def maybe_detach(x: Any):
     """Detaches tensor if necessary, returns value.
 
