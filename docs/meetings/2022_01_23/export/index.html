@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+
+  <title>Reveal JS presentation</title>
+
+  <meta name="description" content="A framework for easily creating beautiful presentations using HTML">
+  <meta name="author" content="Hakim El Hattab">
+
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <link rel="stylesheet" href="libs/reveal.js/4.3.1/reset.css">
+  <link rel="stylesheet" href="libs/reveal.js/4.3.1/reveal.css">
+
+  <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.5.0/css/font-awesome.min.css">
+
+  <!-- highlight Theme -->
+  
+  <link rel="stylesheet" href="libs/highlight.js/11.3.1/styles/monokai.min.css">
+  
+	
+		
+	<link rel="stylesheet" href="libs/reveal.js/4.3.1/plugin/chalkboard/style.css">
+	
+	
+	
+  <link rel="stylesheet" href="libs/reveal.js/4.3.1/plugin/customcontrols/style.css">
+  
+	
+
+
+
+  <!-- Revealjs Theme -->
+  
+  <link rel="stylesheet" href="libs/reveal.js/4.3.1/theme/simple.css" id="theme">
+  
+  
+
+  <link rel="stylesheet" href="libs/styles/tasklist.css">
+	<link rel="stylesheet" href="libs/styles/iota.css">
+	<link rel="stylesheet" href="libs/styles/layout.css">
+
+
+  <!-- Revealjs Theme -->
+  
+  <link rel="stylesheet" href="customtheme.css">
+  
+
+   <!-- css list -->
+	
+
+   
+
+</head>
+
+<body>
+
+   
+
+  <div class="reveal">
+
+    <!-- Any section element inside of this container is displayed as a slide -->
+    <div class="slides">
+
+      
+
+
+    
+    <section>
+        <section >
+            <h2>Undertanding extreme vegetation response with XAI and geostationary ES data</h2>
+
+            </section>
+        
+            <section >
+                <h3>Goals</h3>
+<ul>
+<li>Model vegetation state (via FVC) and physiology (via LST) observed by a geostationary satellite and</li>
+<li>apply post-hoc explanations to
+<ul>
+<li>identify the impact and temporal scales of meteorological drivers on vegetation anomalies,</li>
+<li>study their interactions with geofactors,</li>
+<li>identify different “response regimes”, and</li>
+<li>assess the potential of XAI for time series.</li>
+</ul>
+</li>
+</ul>
+
+            </section>
+        
+            <section >
+                <h3>Data</h3>
+<p><small><small></p>
+<p>Time range: 2002 - 2021</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Abreviation</th>
+<th>Source</th>
+<th>Spatial resolution</th>
+<th>Temporal resolution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Dynamic features</strong></td>
+</tr>
+<tr>
+<td>Air temperature</td>
+<td>t2m</td>
+<td>ERA5 land</td>
+<td>0.1°</td>
+<td>1 hour</td>
+</tr>
+<tr>
+<td>Precipitation</td>
+<td>tp</td>
+<td>ERA5 land</td>
+<td>0.1°</td>
+<td>1 hour</td>
+</tr>
+<tr>
+<td>Relative humidity</td>
+<td>rH</td>
+<td>ERA5 land</td>
+<td>0.1°</td>
+<td>1 hour</td>
+</tr>
+<tr>
+<td>Surface solar radiation downwards</td>
+<td>ssrd</td>
+<td>ERA5 land</td>
+<td>0.1°</td>
+<td>1 hour</td>
+</tr>
+<tr>
+<td><strong>Static features</strong></td>
+</tr>
+<tr>
+<td>Topographic index</td>
+<td>twi</td>
+<td>-</td>
+<td>0.00416° (-&gt; 0.1°)</td>
+<td>-</td>
+</tr>
+<tr>
+<td>Max rooting depth</td>
+<td>mrd</td>
+<td>Fan</td>
+<td>0.0083° (-&gt; 0.1°)</td>
+<td>-</td>
+</tr>
+<tr>
+<td>Water table depth</td>
+<td>wtd</td>
+<td>Fan</td>
+<td>0.0083° (-&gt; 0.1°)</td>
+<td>-</td>
+</tr>
+<tr>
+<td>Soil sand content (&lt;1m)</td>
+<td>sndppt</td>
+<td>soilgrids</td>
+<td>0.002° (-&gt; 0.1°)</td>
+<td>-</td>
+</tr>
+<tr>
+<td>Canopy height</td>
+<td>ch</td>
+<td>GlobVeg3D</td>
+<td>0.083° (-&gt; 0.1°)</td>
+<td>-</td>
+</tr>
+<tr>
+<td>Percentage tree cover (mean 2003-2019)</td>
+<td>tc</td>
+<td>MOD44B3</td>
+<td>0.001° (-&gt; 0.1°)</td>
+<td>-</td>
+</tr>
+<tr>
+<td><strong>Dynamic targets</strong></td>
+</tr>
+<tr>
+<td>Fractional vegetation cover</td>
+<td>fvc</td>
+<td>Seviri</td>
+<td>0.01° (-&gt; 0.1°)</td>
+<td>1 day</td>
+</tr>
+<tr>
+<td>Land surface temperature</td>
+<td>lst</td>
+<td>Seviri</td>
+<td>0.01° (-&gt; 0.1°)</td>
+<td>1 hour</td>
+</tr>
+</tbody>
+</table>
+<p></small></small></p>
+
+            </section>
+        
+            <section >
+                <img src="fvc.gif" height=600>
+            </section>
+        
+            <section >
+                <h3>Prediction setup</h3>
+<ul>
+<li>Predict one day ahead to avoid effects of targets on inputs</br>
+$y_{\text{fvc}, t, s}, y_{\text{lst}, t, s} = f(X_{\text{met}, &lt;t, s}, X_{\text{static}, s})$</li>
+<li>Predict anomalies as I want to look at extremes and not seasonality (hard to disentangle as we know from Memory paper)</li>
+<li>Use MSC as auxiliary task, because model does not learn anomalies so far (not tested yet)</br>
+$y_{\text{fvc_ano}, t, s}, y_{\text{lst_ano}, t, s}, y_{\text{fvc_msc}, s}, y_{\text{lst_msc}, s} =\ f(…)$</li>
+</ul>
+
+            </section>
+        
+            <section >
+                <h3>Spatial domain</h3>
+<img src="cross_val_scheme_dense.png" height=600>
+            </section>
+        
+            <section >
+                <h3>Cross-validation</h3>
+<img src="cross_val_scheme.png" height=400>
+            </section>
+        
+            <section >
+                <h3>Post-hoc explanations: integrated gradients</h3>
+<figure>
+<img src="ig_img.png" height=300>
+  <figcaption>Local attribution method: how does feature $x_i$ impact the model prediction?</figcaption>
+</figure>
+            </section>
+        
+            <section >
+                <h3>Post-hoc explanations: integrated hessians</h3>
+<figure>
+<img src="ih_img.png" height=300>
+  <figcaption>With integrated Hessians, we also get interactions.</figcaption>
+</figure>
+            </section>
+        
+            <section >
+                <h3>Post-hoc explanations: integrated hessians</h3>
+<figure>
+<img src="attr_x1_zerobaseline.png" height=250>
+<img src="attr_x2_zerobaseline.png" height=250>
+  <figcaption>Attributions to $x_1$ (top) and $x_2$(bottom) for the function $y = x_1^2 + 2 x_2 + x_1 x_2 + e$ with
+zero-baseline.</figcaption>
+</figure>
+            </section>
+        
+            <section >
+                <h3>Post-hoc explanations: integrated hessians</h3>
+<p>How to chose a baseline?</p>
+<ul>
+<li>For meteorology: MSC (?)</li>
+<li>For geofactors: global mean?</li>
+</ul>
+<p>Another option: expected hessians, where we integrate from randomly drawn samples.</p>
+
+            </section>
+        
+            <section >
+                <h3>Some nice properties of integrated gradients / hessians</h3>
+<ul>
+<li><strong>Completeness |</strong> The impact is in units of the target and the sum of the impacts adds up to the change in $f(x) - f(x’)$</li>
+<li><strong>Sensitivity |</strong> If a features changes the prediction, it must have non-zero attribution.</li>
+<li><strong>Implementation invariance |</strong> If two models yield the same predictions, their attribution must be the same</li>
+</ul>
+
+            </section>
+        
+            <section >
+                <h3>Work done so far</h3>
+<ul>
+<li>Data processing (with MSC and anomalies for targets): INT16 + compressed ~600GB</li>
+<li>Super fast data pipeline :)</li>
+<li>Some basic models (LSTM and convolution-based)</li>
+<li>Ready to start!</li>
+</ul>
+
+            </section>
+        
+            <section >
+                <h3>Discussion</h3>
+<ul>
+<li>Objectives</li>
+<li>Prediction setup</li>
+<li>Data</li>
+<li>XAI</li>
+<li>Schedule</li>
+<li>Meetings</li>
+</ul>
+
+            </section>
+        
+
+    </section>
+    
+
+
+    </div>
+
+
+  </div>
+
+  <div class="line top"></div>
+  <div class="line bottom"></div>
+  <div class="line left"></div>
+  <div class="line right"></div>
+
+  <script src="libs/reveal.js/4.3.1/reveal.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/notes/notes.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/markdown/markdown.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/highlight/highlight.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/math/math.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/fullscreen/plugin.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/animate/plugin.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/animate/svg.min.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/anything/plugin.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/anything/Chart.min.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/anything/d3/d3.v3.min.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/anything/d3.patch.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/anything/d3/queue.v1.min.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/anything/d3/topojson.v1.min.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/anything/function-plot.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/customcontrols/plugin.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/embed-tweet/plugin.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/chart/chart.min.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/chart/plugin.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/verticator/verticator.js"></script>
+
+<script src="libs/reveal.js/4.3.1/plugin/zoom/zoom.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/search/search.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/menu/menu.js"></script>
+<script src="libs/reveal.js/4.3.1/plugin/chalkboard/plugin.js"></script>
+
+<!--	<script src="libs/reveal.js/4.3.1/plugin/audio-slideshow/plugin.js"></script>  -->
+<!--	<script src="libs/reveal.js/4.3.1/plugin/audio-slideshow/recorder.js"></script>-->
+<!--	<script src="libs/reveal.js/4.3.1/plugin/audio-slideshow/RecordRTC.js"></script>-->
+
+  
+
+<script>
+  const printPlugins = [
+      RevealNotes,
+      RevealHighlight,
+      RevealMath.MathJax3,
+      RevealAnimate,
+      RevealChalkboard, 
+			RevealEmbedTweet,
+			RevealChart,
+		];
+
+		const plugins =  [...printPlugins,
+		RevealZoom, 
+		RevealSearch, 
+				RevealMarkdown, 
+				RevealMenu, 
+				RevealFullscreen,
+				RevealAnything,
+				//RevealAudioSlideshow,
+				//RevealAudioRecorder,
+				RevealCustomControls, 
+				// poll
+				// question
+				// seminar
+				Verticator 
+				 ]
+
+
+		// Also available as an ES module, see:
+		// https://revealjs.com/initialization/
+		Reveal.initialize({
+			controls: true,
+      controlsTutorial: true,
+      controlsLayout: 'bottom-right',
+      controlsBackArrows: 'faded',
+      progress: true,
+      slideNumber: false,
+      //#showSlideNumber "all" "print" "speaker"
+      hash: true, //# hash: false,
+      //# respondToHashChanges: true,
+      //# history: false,
+      keyboard: true,
+      //#keyboardCondition: null,
+      overview: true,
+      center: true,
+      touch: true,
+      loop: false,
+      rtl: false,
+      //#navigationMode: 'default', linear grid
+      shuffle: false,
+      fragments: true,
+      fragmentInURL: false,
+      embedded: false,
+      help: true,
+      //#pause: true
+      showNotes: false,
+      autoPlayMedia: true, // TODO fix this to a nullable value
+      //#preloadIframes: null. true false
+      //#autoAnimate: true
+      //#autoAnimateMatcher: null,
+      //#autoAnimateEasing: 'ease',
+      //autoAnimateDuration: 1.0,
+      //#autoAnimateUnmatched: true
+      //#autoAnimateStyles: []
+      autoSlide: 0, // TODO fix this to a falseable value
+      autoSlideStoppable: true,
+      autoSlideMethod: '0',
+      defaultTiming: 120,
+      mouseWheel: false,
+      //#previewLinks: false
+      //#postMessage: true, // TODO : this can cause issues with the vscode api ???
+      //#postMessageEvents: false,
+      //#focusBodyOnPageVisibilityChange: true,
+      transition: 'fade',
+      transitionSpeed: 'default',
+      backgroundTransition: 'fade',
+      //#pdfMaxPagesPerSlide: Number.POSITIVE_INFINITY,
+      //#pdfSeparateFragments: true,
+      //#pdfPageHeightOffset: -1,
+      viewDistance: 3,
+      //#mobileViewDistance: 2,
+      display: 'block',
+      //#hideInactiveCursor: true,
+      //#hideCursorTime: 5000
+
+      // Parallax Background
+      parallaxBackgroundImage: '',
+      parallaxBackgroundSize: '',
+      parallaxBackgroundHorizontal: 0,
+      parallaxBackgroundVertical: 0,
+
+      //Presentation Size
+      width: 960,
+			height: 700,
+			margin: 0.04,
+      minScale: 0.2,
+      maxScale: 2,
+      disableLayout: false,
+
+      audio: {
+        prefix: 'audio/', // audio files are stored in the "audio" folder
+        suffix: '.ogg', // audio files have the ".ogg" ending
+        textToSpeechURL: null, // the URL to the text to speech converter
+        defaultNotes: false, // use slide notes as default for the text to speech converter
+        defaultText: false, // use slide text as default for the text to speech converter
+        advance: 0, // advance to next slide after given time in milliseconds after audio has played, use negative value to not advance
+        autoplay: false, // automatically start slideshow
+        defaultDuration: 5, // default duration in seconds if no audio is available
+        defaultAudios: true, // try to play audios with names such as audio/1.2.ogg
+        playerOpacity: 0.05, // opacity value of audio player if unfocused
+        playerStyle: 'position: fixed; bottom: 4px; left: 25%; width: 50%; height:75px; z-index: 33;', // style used for container of audio controls
+        startAtFragment: false, // when moving to a slide, start at the current fragment or at the start of the slide
+      },
+      
+      chalkboard: { // font-awesome.min.css must be available
+        //src: "chalkboard/chalkboard.json",
+        storage: "chalkboard-demo",
+      },
+      
+			customcontrols: {
+					controls: [
+      						{
+						  id: 'toggle-overview',
+						  title: 'Toggle overview (O)',
+						  icon: '<i class="fa fa-th"></i>',
+						  action: 'Reveal.toggleOverview();'
+						}
+						,
+      {
+        icon: '<i class="fa fa-pen-square"></i>',
+        title: 'Toggle chalkboard (B)',
+        action: 'RevealChalkboard.toggleChalkboard();'
+      },
+      {
+        icon: '<i class="fa fa-pen"></i>',
+        title: 'Toggle notes canvas (C)',
+        action: 'RevealChalkboard.toggleNotesCanvas();'
+      }
+      
+				]
+			},
+			chart: {
+					defaults: { 
+						color: 'lightgray', // color of labels
+						scale: { 
+							beginAtZero: true, 
+							ticks: { stepSize: 1 },
+							grid: { color: "lightgray" } , // color of grid lines
+						},
+					},
+					line: { borderColor: [ "rgba(20,220,220,.8)" , "rgba(220,120,120,.8)", "rgba(20,120,220,.8)" ], "borderDash": [ [5,10], [0,0] ] }, 
+					bar: { backgroundColor: [ "rgba(20,220,220,.8)" , "rgba(220,120,120,.8)", "rgba(20,120,220,.8)" ]}, 
+					pie: { backgroundColor: [ ["rgba(0,0,0,.8)" , "rgba(220,20,20,.8)", "rgba(20,220,20,.8)", "rgba(220,220,20,.8)", "rgba(20,20,220,.8)"] ]},
+					radar: { borderColor: [ "rgba(20,220,220,.8)" , "rgba(220,120,120,.8)", "rgba(20,120,220,.8)" ]}, 
+			},
+			math: {
+				mathjax: 'https://cdn.jsdelivr.net/gh/mathjax/mathjax@2.7.8/MathJax.js',
+				config: 'TeX-AMS_HTML-full',
+				// pass other options into `MathJax.Hub.Config()`
+				TeX: { Macros: { RR: "{\\bf R}" } }
+				},
+				anything: [ 
+				{
+		className: "plot",
+		defaults: {width:500, height: 500, grid:true},
+		initialize: (function(container, options){ options.target = "#"+container.id; functionPlot(options) })
+	 },
+	 {
+		className: "chart",  
+		initialize: (function(container, options){ container.chart = new Chart(container.getContext("2d"), options);  })
+	 },
+	 {
+		className: "anything",
+		initialize: (function(container, options){ if (options && options.initialize) { options.initialize(container)} })
+	 },
+					],
+			// Learn about plugins: https://revealjs.com/plugins/
+			plugins: (window.location.search.match(/print-pdf/gi) ? printPlugins : plugins ) 
+		});
+			
+
+
+	    // Change chalkboard theme : 
+		function changeTheme(input) {
+			var config = {};
+			config.theme = input.value;
+			Reveal.getPlugin("RevealChalkboard").configure(config);
+			input.blur();
+		}
+
+		// // Handle the message inside the webview
+        // window.addEventListener('message', event => {
+
+        //     const message = event.data; // The JSON data our extension sent
+
+        //     switch (message.command) {
+        //         case 'refactor':
+        //             Reveal.toggleHelp();
+        //     }
+        // });
+
+		if (window.location.search.match(/print-pdf-now/gi)) {
+      		setTimeout(() => {
+				window.print();
+			  }, 2500);
+			
+    }
+</script>
+
+</body>
+
+</html>

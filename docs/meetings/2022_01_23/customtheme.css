@@ -1,0 +1,74 @@
+
+.reveal h1 {
+  font-size: 2.11em;
+}
+
+.reveal h2 {
+  font-size: 1.55em;
+}
+
+.reveal h3 {
+  font-size: 1em;
+}
+
+.reveal h4 {
+  font-size: 1em;
+}
+
+.reveal h5 {
+  font-size: 0.5em;
+}
+
+.reveal h6 {
+  font-size: 1.55em;
+}
+
+.reveal section img {
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  box-shadow: none;
+}
+
+.reveal figure {
+  display: inline-block;
+  margin: 0;
+}
+
+.reveal figcaption {
+  font-size: 0.5em;
+}
+
+#left {
+  left:-8.33%;
+  text-align: left;
+  float: left;
+  width:50%;
+  z-index:-10;
+}
+
+#right {
+  left:31.25%;
+  top: 75px;
+  float: right;
+  text-align: right;
+  z-index:-10;
+  width:50%;
+}
+
+.cite {
+  font-style: italic;
+  font-size: large;
+  color: rgb(99, 99, 99);
+}
+
+.reveal video
+{
+  max-width: 150%;
+  max-height: 150%;
+  border: none;
+  box-shadow: none;
+  max-height: calc(66vh);
+  max-width: calc(66vw);
+}
