@@ -6,6 +6,7 @@ import pandas as pd
 import xarray as xr
 import dask
 import numpy as np
+from scipy.ndimage import binary_dilation
 import torch.multiprocessing as mp
 import queue
 import time
@@ -13,8 +14,9 @@ import traceback
 from itertools import product
 import warnings
 from typing import Any, Iterable
+from numpy.typing import ArrayLike
 
-from utils.types import DateLookup, Coords, BatchPattern, QueueException
+from project.utils.types import DateLookup, Coords, BatchPattern, QueueException
 
 # Ignore anticipated PL warnings.
 warnings.filterwarnings('ignore', '.*does not have many workers.*')
@@ -84,12 +86,13 @@ class DataChunk(object):
             mask: xr.DataArray,
             features_hourly: list[str] = [],
             features_static: list[str] = [],
-            targets_hourly: list[str] = [],
-            targets_daily: list[str] = [],
+            target_hourly: list[str] = [],
+            target_daily: list[str] = [],
             context_size: int = 2,
             window_size: int = -1,
             chunk_index: int = 2,
-            feature_scaling: dict[str, dict[str, float]] = None,
+            data_scaling: dict[str, dict[str, float]] = None,
+            unfold_msc: bool = True,
             dtype: str = 'float32',
             disable_shuffling: bool = False,
             dummy_data: bool = False) -> None:
@@ -105,13 +108,15 @@ class DataChunk(object):
 
         self.features_hourly = features_hourly
         self.features_static = features_static
-        self.targets_hourly = targets_hourly
-        self.targets_daily = targets_daily
+        self.target_hourly = target_hourly
+        self.target_daily = target_daily
+
         self.context_size = context_size
         self.window_size = window_size
         self.chunk_index = chunk_index
 
-        self.feature_scaling = feature_scaling
+        self.data_scaling = data_scaling
+        self.unfold_msc = unfold_msc
         self.dtype = dtype
         self.disable_shuffling = disable_shuffling
         self.dummy_data = dummy_data
@@ -127,22 +132,55 @@ class DataChunk(object):
 
         data_sel = self.data.isel(sample=sample).sel(time=time.time_slice)
 
+        dayofyear = data_sel.time.dt.dayofyear - 1
+
+        if self.unfold_msc:
+            for var in self.target_daily + self.target_hourly:
+                data_sel[var + '_msc'] = data_sel[var + '_msc'].sel(dayofyear=dayofyear)
+
+        f_hourly = self.xr2numpy(data_sel[self.features_hourly], scale=True)
+        f_static = self.xr2numpy(data_sel[self.features_static], scale=True)
+
+        if len(self.target_hourly) > 0:
+            target_hourly = self.target_hourly[0]
+            t_hourly_ts = self.xr2numpy(data_sel[[target_hourly]], scale=True)
+            t_hourly_msc = self.xr2numpy(data_sel[[target_hourly + '_msc']], scale=True)
+            t_hourly_ano = self.xr2numpy(data_sel[[target_hourly + '_ano']], scale=True)
+        else:
+            t_hourly_ts = None
+            t_hourly_msc = None
+            t_hourly_ano = None
+
+        if len(self.target_daily) > 0:
+            target_daily = self.target_daily[0]
+            t_daily_ts = self.xr2numpy(data_sel[[target_daily]], scale=True)
+            t_daily_msc = self.xr2numpy(data_sel[[target_daily + '_msc']], scale=True)
+            t_daily_ano = self.xr2numpy(data_sel[[target_daily + '_ano']], scale=True)
+        else:
+            t_daily_ts = None
+            t_daily_msc = None
+            t_daily_ano = None
+
+        coords = Coords(
+            lat=data_sel.lat.item(),
+            lon=data_sel.lon.item(),
+            window_start=time.start_window_date,
+            window_end=time.end_window_date,
+            num_days=time.num_window_days,
+            chunk=self.chunk_index,
+            dayofyear=dayofyear.values
+        )
+
         return BatchPattern(
-            f_hourly=self.xr2numpy(
-                data_sel[self.features_hourly], scale=False), # CHANGE BACK TO TRUE
-            f_static=self.xr2numpy(
-                data_sel[self.features_static], scale=False), # CHANGE BACK TO TRUE
-            t_hourly=self.xr2numpy(data_sel[self.targets_hourly], scale=False
-            ),
-            t_daily=self.xr2numpy(data_sel[self.targets_daily], scale=False
-            ),
-            coords=Coords(
-                lat=data_sel.lat.item(),
-                lon=data_sel.lon.item(),
-                window_start=time.start_window_date,
-                window_end=time.end_window_date,
-                num_days=time.num_window_days,
-                chunk=self.chunk_index)
+            f_hourly=f_hourly,
+            f_static=f_static,
+            t_hourly_ts=t_hourly_ts,
+            t_hourly_msc=t_hourly_msc,
+            t_hourly_ano=t_hourly_ano,
+            t_daily_ts=t_daily_ts,
+            t_daily_msc=t_daily_msc,
+            t_daily_ano=t_daily_ano,
+            coords=coords
         )
 
     def get_n_next(self, n: int):
@@ -159,28 +197,45 @@ class DataChunk(object):
             return None
 
         if scale:
-            if self.feature_scaling is None:
-                raise ValueError(
-                    'no `feature_scaling` has been passed but scling was requested.'
-                )
             for var in x.data_vars:
-                if var not in self.feature_scaling:
+                if var not in self.data_scaling:
                     raise KeyError(
-                        f'scling for variable `{var}` requested, but not present in `feature_scaling`.'
+                        f'scling for variable `{var}` requested, but not present in `data_scaling`.'
                     )
-                scaling = self.feature_scaling[var]
-                data_min = scaling['min']
-                data_max = scaling['max']
-                x[var] = (x[var] - data_min) * 2 / (data_max - data_min) - 1
 
-        return x.to_array('var').transpose('time', 'hour', 'var', missing_dims='ignore').values.astype(self.dtype)
+                x[var] = self.normalize_var(x=x[var], stats=self.data_scaling[var], invert=False)
+
+        return x.to_array('var').transpose(
+            'time', 'dayofyear', 'hour', 'var', missing_dims='ignore').values.astype(self.dtype)
+
+    @staticmethod
+    def normalize_var(
+            x: xr.DataArray | ArrayLike | Tensor,
+            stats: dict[str, float],
+            invert: bool = False,
+            is_uncertainty: bool = False) -> xr.DataArray | ArrayLike | Tensor:
+        """(De-)Normalize xarray DataArray."""
+
+        data_mean = stats['mean']
+        data_std = stats['std']
+
+        if invert:
+            if is_uncertainty:
+                return x * data_std
+            else:
+                return x * data_std + data_mean
+        else:
+            if is_uncertainty:
+                return x / data_std
+            else:
+                return (x - data_mean) / data_std
 
     def _get_coords(self) -> Iterable[tuple[int, DateLookup]]:
 
         sample_coords = np.arange(len(self.data.sample))
         time_coords = self._get_dates()
 
-        coords = combination = [p for p in product(sample_coords, time_coords)]
+        coords = [p for p in product(sample_coords, time_coords)]
         if not self.disable_shuffling:
             np.random.shuffle(coords)
         return coords
@@ -218,7 +273,8 @@ class DataChunk(object):
 
     def _get_dates(self) -> list[DateLookup]:
 
-        years, window_size, _ = self.get_years(data=self.data, window_size=self.window_size, context_size=self.context_size)
+        years, window_size, _ = self.get_years(
+            data=self.data, window_size=self.window_size, context_size=self.context_size)
 
         date_lookup = [
             self.get_date_lookup(
@@ -241,14 +297,14 @@ class DataChunk(object):
         time_slice = slice(start_context_date, end_window_date)
 
         return DateLookup(
-            start_context_year = start_context_year,
-            start_window_year = start_window_year,
-            end_window_year = end_window_year,
-            start_context_date = start_context_date,
-            start_window_date = start_window_date,
-            end_window_date = end_window_date,
-            num_window_days = num_window_days,
-            time_slice = time_slice
+            start_context_year=start_context_year,
+            start_window_year=start_window_year,
+            end_window_year=end_window_year,
+            start_context_date=start_context_date,
+            start_window_date=start_window_date,
+            end_window_date=end_window_date,
+            num_window_days=num_window_days,
+            time_slice=time_slice
         )
 
     @property
@@ -264,6 +320,7 @@ class QueueFiller(object):
             self,
             data: xr.Dataset,
             mask: xr.DataArray,
+            data_scaling: dict[str, dict[str, float]],
             chunk_coords: xr.DataArray,
             batch_queue: mp.Queue,
             index_queue: mp.Queue,
@@ -271,8 +328,8 @@ class QueueFiller(object):
             chunk_buffer_size: int,
             features_hourly: list[str] = [],
             features_static: list[str] = [],
-            targets_hourly: list[str] = [],
-            targets_daily: list[str] = [],
+            target_hourly: list[str] = [],
+            target_daily: list[str] = [],
             window_size: int = 2,
             context_size: int = 2,
             drop_last: bool = False,
@@ -286,6 +343,7 @@ class QueueFiller(object):
                 the dimensions `lat` and `lon`.
             mask: a spatio-temporal mask indicating valid pixels (`True`). Must at least have
                 the dimensions `lat` and `lon` equal to `ds`.
+            data_scaling: variable scaling, dicts with pattern {<variable>: {'mean': <value>, 'std': <value>}}.
             chunk_coords: coordinates corresponding to chunks with any valid samples in them,
                 an array with shape n x 2, each element being a lat, lon coordinate.
             a spatio-temporal mask indicating valid chunks (`True`). Must at least have
@@ -296,8 +354,8 @@ class QueueFiller(object):
             chunk_buffer_size: the size of the queue, i.e., max number of batches to preload.
             features_hourly: a list of hourly dynamic features, must be data variables of `ds`.
             features_static: a list of static features, must be data variables of `ds`.
-            targets_hourly: a list of hourly dynamic targets, must be data variables of `ds`.
-            targets_daily: a list of daily dynamic targets, must be data variables of `ds`.
+            target_hourly: hourly dynamic target, must be data variables of `ds`.
+            target_daily: daily dynamic target, must be data variables of `ds`.
             window_size: the window size in years (an integer) used for gradient computation during training.
                 Default is 2.
             context_size: additional temporal context size in years (an integer).
@@ -314,14 +372,15 @@ class QueueFiller(object):
 
         self.data = data
         self.mask = mask.load()
+        self.data_scaling = data_scaling
         self.chunk_coords = chunk_coords
         self.batch_queue = batch_queue
         self.index_queue = index_queue
 
         self.features_hourly = features_hourly
         self.features_static = features_static
-        self.targets_hourly = targets_hourly
-        self.targets_daily = targets_daily
+        self.target_hourly = target_hourly
+        self.target_daily = target_daily
         self.window_size = window_size
         self.context_size = context_size
 
@@ -332,7 +391,6 @@ class QueueFiller(object):
         self.disable_shuffling = disable_shuffling
         self.dummy_data = dummy_data
 
-        self.feature_scaling = self._get_scaling(self.data, self.features_hourly, self.features_static)
         self.chunk_bounds_lat = self.coords2bounds(self.mask, dim='lat', chunk_size=self.chunk_size)
         self.chunk_bounds_lon = self.coords2bounds(self.mask, dim='lon', chunk_size=self.chunk_size)
 
@@ -378,11 +436,11 @@ class QueueFiller(object):
                                     mask=mask_chunk,
                                     features_hourly=self.features_hourly,
                                     features_static=self.features_static,
-                                    targets_daily=self.targets_daily,
-                                    targets_hourly=self.targets_hourly,
+                                    target_daily=self.target_daily,
+                                    target_hourly=self.target_hourly,
                                     window_size=self.window_size,
                                     context_size=self.context_size,
-                                    feature_scaling=self.feature_scaling,
+                                    data_scaling=self.data_scaling,
                                     disable_shuffling=self.disable_shuffling,
                                     dummy_data=self.dummy_data,
                                     chunk_index=index
@@ -440,21 +498,6 @@ class QueueFiller(object):
 
         return suggested_sizes
 
-    def _get_scaling(
-            self,
-            data: xr.Dataset,
-            features_hourly: list[str],
-            features_static: list[str]) -> dict[str, dict[str, float]]:
-
-        min_max = {}
-
-        for var in features_hourly + features_static:
-            data_min = data[var].attrs['data_min']
-            data_max = data[var].attrs['data_max']
-            min_max.update({var: {'min': data_min, 'max': data_max}})
-
-        return min_max
-
     @property
     def num_buffered(self) -> int:
         return len(self.chunks)
@@ -480,12 +523,12 @@ class QueueFiller(object):
         return len(self.features_static)
 
     @property
-    def num_targets_hourly(self) -> int:
-        return len(self.targets_hourly)
+    def num_target_hourly(self) -> int:
+        return len(self.target_hourly)
 
     @property
-    def num_targets_daily(self) -> int:
-        return len(self.targets_daily)
+    def num_target_daily(self) -> int:
+        return len(self.target_daily)
 
 
 class DataQueue(IterableDataset):
@@ -500,8 +543,8 @@ class DataQueue(IterableDataset):
             num_queue_workers: int = 12,
             features_hourly: list[str] = [],
             features_static: list[str] = [],
-            targets_hourly: list[str] = [],
-            targets_daily: list[str] = [],
+            target_hourly: list[str] = [],
+            target_daily: list[str] = [],
             window_size: int = 2,
             context_size: int = 2,
             drop_last: bool = False,
@@ -519,8 +562,8 @@ class DataQueue(IterableDataset):
         self.num_queue_workers = num_queue_workers
         self.features_hourly = features_hourly
         self.features_static = features_static
-        self.targets_hourly = targets_hourly
-        self.targets_daily = targets_daily
+        self.target_hourly = target_hourly
+        self.target_daily = target_daily
         self.window_size = window_size
         self.context_size = context_size
         self.drop_last = drop_last
@@ -528,10 +571,13 @@ class DataQueue(IterableDataset):
         self.disable_shuffling = disable_shuffling
         self.dummy_data = dummy_data
 
-        _, _, self.num_year_samples = DataChunk.get_years(data=self.data, window_size=window_size, context_size=context_size)
+        _, _, self.num_year_samples = DataChunk.get_years(
+            data=self.data, window_size=window_size, context_size=context_size)
         self.num_samples = self.mask.sum().compute().item() * self.num_year_samples
         self.chunk_mask = (self.mask.coarsen(lat=chunk_size, lon=chunk_size).sum() > 0).compute()
         self.chunk_coords = np.argwhere(self.chunk_mask.values)
+        self.data_scaling = self._get_scaling(
+            self.data, self.features_hourly, self.features_static, self.target_hourly, self.target_daily)
 
         self._check_ds(self.data, self.mask)
 
@@ -543,6 +589,7 @@ class DataQueue(IterableDataset):
         queue_filler = QueueFiller(
             data=self.data,
             mask=self.mask,
+            data_scaling=self.data_scaling,
             chunk_coords=self.chunk_coords,
             batch_queue=batch_queue,
             index_queue=index_queue,
@@ -550,8 +597,8 @@ class DataQueue(IterableDataset):
             chunk_buffer_size=self.chunk_buffer_size,
             features_hourly=self.features_hourly,
             features_static=self.features_static,
-            targets_daily=self.targets_daily,
-            targets_hourly=self.targets_hourly,
+            target_daily=self.target_daily,
+            target_hourly=self.target_hourly,
             window_size=self.window_size,
             context_size=self.context_size,
             drop_last=False,
@@ -639,14 +686,15 @@ class DataQueue(IterableDataset):
             for incomplete_batch in subsize_batches:
                 for i in range(len(incomplete_batch.coords.lat)):
                     batch_item = BatchPattern(
-                        *[el if el is None else el[i] for el in incomplete_batch[:4]],
+                        *[el if el is None else el[i] for el in incomplete_batch[:8]],
                         coords=Coords(
                             lat=incomplete_batch.coords.lat[i],
                             lon=incomplete_batch.coords.lon[i],
                             window_start=incomplete_batch.coords.window_start[i],
                             window_end=incomplete_batch.coords.window_end[i],
                             num_days=incomplete_batch.coords.num_days[i],
-                            chunk=incomplete_batch.coords.chunk[i]))
+                            chunk=incomplete_batch.coords.chunk[i],
+                            dayofyear=incomplete_batch.coords.dayofyear[i]))
                     batch_items.append(batch_item)
                     if len(batch_items) == self.batch_size:
                         batch = batchpattern_collate(batch_items)
@@ -662,19 +710,21 @@ class DataQueue(IterableDataset):
         return BatchPattern(
             f_hourly=torch.randn(self.batch_size, 730, 24, len(self.features_hourly)) if self.features_hourly else None,
             f_static=torch.randn(self.batch_size, len(self.features_static)) if self.features_static else None,
-            t_daily=torch.randn(self.batch_size, 730, len(self.targets_daily)) if self.targets_daily else None,
-            t_hourly=torch.randn(self.batch_size, 730, 24, len(self.targets_hourly)) if self.targets_hourly else None,
+            t_daily=torch.randn(self.batch_size, 730, len(self.target_daily)) if self.target_daily else None,
+            t_hourly=torch.randn(self.batch_size, 730, 24, len(self.target_hourly)) if self.target_hourly else None,
             coords=Coords(
                 lat=torch.arange(self.batch_size), lon=torch.arange(self.batch_size),
                 window_start=['2006-01-01'] * self.batch_size,
                 window_end=['2006-12-31'] * self.batch_size,
                 num_days=[365] * self.batch_size,
-                chunk=torch.arange(self.batch_size))
+                chunk=torch.arange(self.batch_size),
+                dayofyear=np.arange(len(730)) % 366
+            )
         )
 
     @property
-    def targets(self) -> list[str]:
-        return self.targets_daily + self.targets_hourly
+    def target(self) -> list[str]:
+        return self.target_daily + self.target_hourly
 
     @property
     def num_chunks(self) -> int:
@@ -709,6 +759,29 @@ class DataQueue(IterableDataset):
                 'the inputs `ds` and `mask` both most have dimensions `lat` and `lon`, but the '
                 f'following dimensions are not present: {missing_dim}'
             )
+
+    def _get_scaling(
+            self,
+            data: xr.Dataset,
+            features_hourly: list[str],
+            features_static: list[str],
+            target_hourly: list[str],
+            target_daily: list[str]) -> dict[str, dict[str, float]]:
+
+        stats = {}
+
+        if len(target_hourly) > 0:
+            target_hourly = [target_hourly[0], target_hourly[0] + '_msc', target_hourly[0] + '_ano']
+        if len(target_daily) > 0:
+            target_daily = [target_daily[0], target_daily[0] + '_msc', target_daily[0] + '_ano']
+
+        for var in features_hourly + features_static + target_hourly + target_daily:
+
+            data_mean = data[var.removesuffix('_msc')].attrs['mean']
+            data_std = data[var.removesuffix('_msc')].attrs['std']
+            stats.update({var: {'mean': data_mean, 'std': data_std}})
+
+        return stats
 
     def __len__(self) -> int:
 
@@ -745,12 +818,12 @@ class GeoDataQueue(pl.LightningDataModule):
     The dataloaders return data in the format:
     > BatchPattern = namedtuple('BatchPattern', 'f_hourly f_static t_hourly, t_daily coords'),
     The `coords` are formatted as:
-    > Coords = namedtuple('Coords', 'lat, lon, chunk')
+    > Coords = namedtuple('Coords', 'lat, lon, chunk, dayofyear')
 
     `f_hourly` are hourly features. They have shape [B, H, D, FH]
     `f_static` are static features. They have shape [B, FS]
-    `t_hourly` are hourly targets. They have shape [B, H, D, TH]
-    `f_daily` are daily targets. They have shape [B, D, TD]
+    `t_hourly` is hourly target. They have shape [B, H, D, TH]
+    `f_daily` is daily target. They have shape [B, D, TD]
     `lat`, `lon` are latitudes and longitudes of each samples, they both have shape [B]
     `chunk` is the chunk id of each samples with shape [B]
 
@@ -759,8 +832,8 @@ class GeoDataQueue(pl.LightningDataModule):
     * num_days: D
     * num_features_hourly: FH
     * num_features_static: FS
-    * num_targets_hourly: TH
-    * num_targets_daily: TD
+    * num_target_hourly: TH
+    * num_target_daily: TD
 
     Access data in a batch as:
     `batch = next(iter(dataloader))`
@@ -776,9 +849,8 @@ class GeoDataQueue(pl.LightningDataModule):
     def __init__(
             self,
             fold_id: int,
-            target_daily: list[str],
-            target_hourly: list[str] = [],
-            num_folds: int = 6,
+            target_daily: str | None = None,
+            target_hourly: str | None = None,
             batch_size: int = 50,
             chunk_buffer_size: int = 4,
             queue_size: int = 20,
@@ -787,6 +859,7 @@ class GeoDataQueue(pl.LightningDataModule):
             window_size: int = 2,
             context_size: int = 2,
             full_seq_prediction: bool = True,
+            n_mask_erode: int = 15,
             disable_shuffling: bool = False,
             cube_path: str = '/Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr',
             dummy_data: bool = False,
@@ -802,11 +875,14 @@ class GeoDataQueue(pl.LightningDataModule):
             Else, the same windowing as in training is used.
 
         Args:
-            fold_id: the fold ID, an integer in the range (0, `num_folds` - 1).
-            target_daily: the daily target(s), a list of strings.
-            target_hourly: the hourly target(s), a list of strings. Not implemented yet, takes no effect.
-            num_folds: the number of folds, a positive integer that matches the number of folds
-                in the `fold_mask` (a variable of the dataset). Default is 6.
+            fold_id: the fold ID, an integer in the range (0, 3).
+            target_daily: the daily target. Can eighter
+                - not be passed (then `target_hourly` must be passed),
+                - be length `1` (then `target_hourly` must either not be passed or also be length `1`),
+                - or be length `2` (then `target_hourly` must either not be passed or also be length `2`).
+                With two targets, the esecond one is assumed to be the mean seasonal cycle.
+            target_hourly: the hourly target(s). Not implemented yet, takes no effect. Also
+                see `target_daily`.
             batch_size: the batch size, an integer > 0. Default is 50.
             chunk_buffer_size: the number of spatial chunks to be buffered, an integer > 0.
                 Note that smaller values lead to less randomness in the samples (they tend to come from
@@ -823,6 +899,9 @@ class GeoDataQueue(pl.LightningDataModule):
             full_seq_prediction: whether to validate/test/predict the full time-series at once (default, True) or
                 to use snippets of length `window_size`. If True, the time series length changes in inference, but
                 the forward run may be much faster.
+            n_mask_erode: if > 1, training grid cells with a distance < `n_mask_erode` will be removed from
+                the mask border to reduce dependency between CV folds. Values of 0 and 1 turn off erosion,
+                default is 31.
             cube_path: the path to the data cube (zarr format).
                 Default is '/Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr'.
             dummy_data: if set to `True`, dummy data is returned and reading from disk is omitted; use for debugging.
@@ -833,7 +912,6 @@ class GeoDataQueue(pl.LightningDataModule):
         super().__init__()
 
         self.fold_id = fold_id
-        self.num_folds = num_folds
         self.batch_size = batch_size
         self.chunk_buffer_size = chunk_buffer_size
         self.queue_size = queue_size
@@ -842,6 +920,7 @@ class GeoDataQueue(pl.LightningDataModule):
         self.window_size = window_size
         self.context_size = context_size
         self.full_seq_prediction = full_seq_prediction
+        self.n_mask_erode = n_mask_erode
         self.disable_shuffling = disable_shuffling
         self.dummy_data = dummy_data
         self.dataloader_kwargs = dataloader_kwargs
@@ -850,7 +929,7 @@ class GeoDataQueue(pl.LightningDataModule):
         self.ds = xr.open_zarr(self.cube_path)
 
         self.train_folds, self.valid_folds, self.test_folds = \
-            self.get_fold_split(fold_id=self.fold_id, num_folds=self.num_folds)
+            self.get_fold_split(fold_id=self.fold_id)
 
         self.fold_mask = self.ds.fold_mask.load()
 
@@ -860,24 +939,48 @@ class GeoDataQueue(pl.LightningDataModule):
         self.features_static = [
             'canopyheight', 'rootdepth', 'percent_tree_cover', 'sandfrac', 'topidx', 'wtd'
         ]
-        self.targets_daily = target_daily
-        self.targets_hourly = target_hourly
 
-    @staticmethod
-    def get_fold_split(fold_id: int, num_folds: int) -> tuple[list[int], list[int], list[int]]:
-
-        if (fold_id < 0) or (fold_id > num_folds - 1):
+        if target_daily is None and target_hourly is None:
             raise ValueError(
-                f'`fold_id` out of range; must be an integer in the range (0, {num_folds - 1})'
+                'pass either `target_daily` or `target_hourly`.'
             )
 
-        folds = {fold for fold in range(num_folds)}
-        val_fold = fold_id
-        test_fold = (fold_id + 3) % 6
-        folds = folds - {val_fold, test_fold}
+        self.target_daily = [] if target_daily is None else [target_daily]
+        self.target_hourly = [] if target_hourly is None else [target_hourly]
+
+    @staticmethod
+    def get_fold_split(fold_id: int, num_folds: int = 12) -> tuple[list[int], list[int], list[int]]:
+
+        if (fold_id < 0) or (fold_id >= num_folds):
+            raise ValueError(
+                f'`fold_id` out of range; must be an integer in the range [0, {num_folds-1}]'
+            )
+
+        folds = set(range(1, num_folds + 1))
+
+        buffer = {fold_id % num_folds + 1, (fold_id + 3) % num_folds + 1}
+        val_fold = {(fold_id + 1) % num_folds + 1}
+        test_fold = {(fold_id + 2) % num_folds + 1}
+        folds = folds - val_fold - test_fold - buffer
         folds = list(folds)
 
-        return folds, [val_fold], [test_fold]
+        return folds, list(val_fold), list(test_fold)
+
+    # @staticmethod
+    # def get_fold_split(fold_id: int) -> tuple[list[int], list[int], list[int]]:
+
+    #     if (fold_id < 0) or (fold_id > 3):
+    #         raise ValueError(
+    #             '`fold_id` out of range; must be an integer in the range [0, 3]'
+    #         )
+
+    #     folds = set(range(1, 5))
+    #     val_fold = fold_id + 1
+    #     test_fold = 4 - fold_id
+    #     folds = folds - {val_fold, test_fold}
+    #     folds = list(folds)
+
+    #     return folds, [val_fold], [test_fold]
 
     def get_dataloader(self, cvset: str):
 
@@ -889,7 +992,12 @@ class GeoDataQueue(pl.LightningDataModule):
 
         # The cvset-specific behavior:
         if cvset == 'train':
-            mask = self.fold_mask.sel(fold=self.train_folds).any('fold').load()
+            mask = self.fold_mask.isin(self.train_folds)
+
+            if self.n_mask_erode > 1:
+                ref_mask = self.fold_mask.isin(self.valid_folds + self.test_folds)
+                mask = self.erode_mask(ref_mask=ref_mask, erode_mask=mask, n=self.n_mask_erode)
+
             window_size = self.window_size
 
             if self.trainer is None or self.trainer.overfit_batches == 0:
@@ -898,15 +1006,16 @@ class GeoDataQueue(pl.LightningDataModule):
                 num_queue_workers = 1  # For consistent batch.
 
         elif cvset == 'valid':
-            mask = self.fold_mask.sel(fold=self.valid_folds).any('fold').load()
+            mask = self.fold_mask.isin(self.valid_folds)
+
             chunk_buffer_size = 1  # No randomness needed.
 
         elif cvset == 'test':
-            mask = self.fold_mask.sel(fold=self.test_folds).any('fold').load()
+            mask = self.fold_mask.isin(self.test_folds)
             chunk_buffer_size = 1  # No randomness needed.
 
         elif cvset == 'predict':
-            mask = self.fold_mask.sel(fold=self.test_folds).any('fold').load()
+            mask = self.fold_mask.isin(self.test_folds)
             chunk_buffer_size = 1  # No randomness needed.
 
         else:
@@ -924,8 +1033,8 @@ class GeoDataQueue(pl.LightningDataModule):
             chunk_buffer_size=chunk_buffer_size,
             features_hourly=self.features_hourly,
             features_static=self.features_static,
-            targets_daily=self.targets_daily,
-            targets_hourly=self.targets_hourly,
+            target_daily=self.target_daily,
+            target_hourly=self.target_hourly,
             window_size=window_size,
             context_size=self.context_size,
             drop_last=False,
@@ -963,6 +1072,34 @@ class GeoDataQueue(pl.LightningDataModule):
         dataloader = self.get_dataloader('predict')
         return dataloader
 
+    @staticmethod
+    def erode_mask(ref_mask, erode_mask, n):
+
+        if n % 2 != 1:
+            raise ValueError(
+                f'kernel size must be an odd number, is {n}.'
+            )
+
+        r = n // 2
+
+        y, x = np.ogrid[-r:n-r, -r:n-r]
+        mask = x * x + y * y <= r * r
+
+        kernel = np.zeros((n, n), dtype=bool)
+        kernel[mask] = True
+
+        mask_ = ref_mask.copy()
+        mask_.values[:] = binary_dilation(ref_mask.values, structure=kernel)
+        eroded_mask = ~mask_ & erode_mask
+        return eroded_mask
+
+    # @staticmethod
+    # def erode_mask(ref_mask, erode_mask, n):
+    #     mask_ = ref_mask.copy()
+    #     mask_.values[:] = binary_dilation(ref_mask.values, structure=np.ones((n, n), dtype='bool'))
+    #     eroded_mask = ~mask_ & erode_mask
+    #     return eroded_mask
+
     @property
     def num_features_hourly(self) -> int:
         return len(self.features_hourly)
@@ -972,13 +1109,5 @@ class GeoDataQueue(pl.LightningDataModule):
         return len(self.features_static)
 
     @property
-    def num_targets_daily(self) -> int:
-        return len(self.targets_daily)
-
-    @property
-    def num_targets_hourly(self) -> int:
-        return len(self.targets_hourly)
-
-    @property
     def targets(self) -> list[str]:
-        return self.targets_daily + self.targets_hourly
+        return self.target_daily + self.target_hourly

@@ -33,10 +33,10 @@ remap_file () {
     #cdo -O -s -fldmin -timmin $file_out $min_file & \
     #cdo -O -s -fldmax -timmax $file_out $max_file || exit 1
 
-    python preprocessing/add_minmax_attr.py \
-        -p $file_out \
-        -n $var \
-        --clean_up || exit 1
+    # python preprocessing/add_minmax_attr.py \
+    #     -p $file_out \
+    #     -n $var \
+    #     --clean_up || exit 1
 }
 
 cdo -O -s gennn,preprocessing/griddes1d \

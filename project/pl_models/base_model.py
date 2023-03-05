@@ -9,11 +9,13 @@ import warnings
 import os
 
 from project.utils.loss_functions import RegressionLoss
-from utils.types import ReturnPattern
+from project.utils.types import ReturnPattern
 from project.dataset import BatchPattern
+from project.utils.types import VarStackPattern
 
 # Ignore anticipated PL warnings.
 warnings.filterwarnings('ignore', '.*infer the indices fetched for your dataloader.*')
+warnings.filterwarnings('ignore', '.*You requested to overfit.*')
 
 logger = logging.getLogger('lightning')
 
@@ -22,7 +24,6 @@ class LightningNet(pl.LightningModule):
     """Implements basic training routine."""
     def __init__(
             self,
-            use_mt_weighting: bool | str | None = False,
             use_n_last: int = 365 + 366,
             **kwargs) -> None:
         """Standard lightning module, should be subclassed.
@@ -42,8 +43,6 @@ class LightningNet(pl.LightningModule):
             where B=batch size, L=sequence length, F=number of sequence features.
 
         Args:
-            use_mt_weighting: whether to use multitask weightig. Default is `False`.
-                Note that the option to pass a string is currently required due to wandb sweeps.
             num_warmup_batches: the number of warmup steps. Does not apply to all
                 schedulers (cyclic and onecycle do start at low lr anyway). No warmup is done if `0`, one full
                 epoch (gradually increasing per batch) if `auto`. Defaults to `auto`.
@@ -55,61 +54,13 @@ class LightningNet(pl.LightningModule):
 
         super().__init__()
 
-        if isinstance(use_mt_weighting, str):
-            if use_mt_weighting.lower() == 'true':
-                self.use_mt_weighting = True
-            elif use_mt_weighting.lower() == 'false':
-                self.use_mt_weighting = False
-            else:
-                raise ValueError(
-                    f'a string other than \'True\' or \'False\' '
-                    f'has passed as argument \'use_mt_weighting\' (\'{use_mt_weighting}\').')
-        elif isinstance(use_mt_weighting, bool):
-            self.use_mt_weighting = use_mt_weighting
-        else:
-            raise TypeError(
-                f'`use_mt_weighting` must be a strong of a boolean, is {use_mt_weighting}.'
-            )
-
         self.use_n_last = use_n_last
 
         self.loss_nan_counter = 0
         self.acc_loss = 0.0
 
         self.loss_fn = RegressionLoss('l1', sample_wise=False, beta=0.5)
-
-    @staticmethod
-    def add_model_specific_args(parent_parser):
-        parser = parent_parser.add_argument_group('Optimizer')
-        parser.add_argument(
-            '--lr', type=float, default=0.001, help='The learning rate.')
-        parser.add_argument(
-            '--weight_decay', type=float, default=0.00, help='The weight decay.')
-        parser.add_argument(  # Don't change to boolean flag!
-            '--use_mt_weighting', type=str, help='\'true\' enables multitask loss weighting, default is \'true\'.', default='false')
-        return parent_parser
-
-    def mt_loss_fn(
-            self,
-            step_type: str,
-            preds: Tensor,
-            targets: Tensor) -> tuple[Tensor, dict[str, Tensor]]:
-
-        num_preds = preds.shape[-1]
-        num_tasks = targets.shape[-1]
-
-        if not (num_preds == num_tasks == self.mt_loss.num_tasks):
-            raise RuntimeError(
-                f'number of predictions ({num_preds}), number of tasks ({num_tasks}), and number of '
-                f'regression tasks ({self.mt_loss.num_tasks}) must be equal.'
-            )
-
-        preds_dict = {task: preds[..., t] for t, task in enumerate(self.mt_loss.reg_tasks)}
-        tasks_dict = {task: targets[..., t] for t, task in enumerate(self.mt_loss.reg_tasks)}
-
-        loss, loss_dict = self.mt_loss(step_type=step_type, pred=preds_dict, target=tasks_dict)
-
-        return loss, loss_dict
+        self.loss_fn_nll = RegressionLoss('betanll', sample_wise=False, beta=0.5)
 
     def shared_step(
             self,
@@ -129,45 +80,71 @@ class LightningNet(pl.LightningModule):
         if step_type not in ('train', 'val', 'test', 'pred'):
             raise ValueError(f'`step_type` must be one of (`train`, `val`, `test`, `pred`), is {step_type}.')
 
-        y_mean_hat, y_var_hat = self(batch.f_hourly, batch.f_static)
+        daily_out: VarStackPattern
+        hourly_out: VarStackPattern
+        daily_out, hourly_out = self(
+            x=batch.f_hourly,
+            x_msc=batch.t_daily_msc,
+            x_ano=batch.t_daily_ano,
+            time=batch.coords.dayofyear,
+            s=batch.f_static
+        )
+        out, var_means, var_uncertainties = self._check_return_variables(daily_out=daily_out, hourly_out=hourly_out)
 
-        # 1-ahead prediction, thus targets are shifted.
-        loss = self.loss_fn(
-            input=y_mean_hat,
-            # variance=y_var_hat[:, self.use_n_last:-1, :],
-            target=batch.t_daily
+        num_cut = batch.coords.num_days[0]
+
+        losses_to_log = {}
+        loss = 0.0
+        if var_uncertainties is None:
+            for var in var_means:
+                var_loss = self.loss_fn(
+                    input=out[var][:, ..., num_cut:, :],
+                    target=getattr(batch, 't_' + var)[:, ..., num_cut:, :]
+                )
+                loss += var_loss
+
+                losses_to_log.update({f'{step_type}/{var}': var_loss})
+        else:
+            for var, var_uncertainty in zip(var_means, var_uncertainties):
+                var_loss = self.loss_fn_nll(
+                    input=out[var][:, ..., num_cut:, :],
+                    variance=out[var_uncertainty][:, ..., num_cut:, :],
+                    target=getattr(batch, 't_' + var)[:, ..., num_cut:, :],
+                )
+                loss += var_loss
+                losses_to_log.update({f'{step_type}/{var}': var_loss})
+
+        losses_to_log.update({f'{step_type}/loss': loss})
+
+        preds = ReturnPattern(
+            daily_ts=daily_out.ts,
+            daily_ts_var=daily_out.ts_var,
+            daily_msc=daily_out.msc,
+            daily_msc_var=daily_out.msc_var,
+            daily_ano=daily_out.ano,
+            daily_ano_var=daily_out.ano_var,
+            hourly_ts=hourly_out.ts,
+            hourly_ts_var=hourly_out.ts_var,
+            hourly_msc=hourly_out.msc,
+            hourly_msc_var=hourly_out.msc_var,
+            hourly_ano=hourly_out.ano,
+            hourly_ano_var=hourly_out.ano_var,
+            coords=batch.coords
         )
 
-        preds = ReturnPattern(mean_hat=y_mean_hat, var_hat=y_var_hat, coords=batch.coords)
-
-        batch_size = y_mean_hat.shape[0]
-
-        if step_type == 'train':
-            self.acc_loss += loss
-            if batch_idx % self.trainer.accumulate_grad_batches == 0 and batch_idx != 0:
-                self.acc_loss = self.acc_loss / self.trainer.accumulate_grad_batches
-                self.log(
-                    name='train_loss',
-                    value=self.acc_loss,
-                    on_step=True,
-                    on_epoch=True,
-                    batch_size=batch_size
-                )
-                self.acc_loss = 0.0
-
-            if batch_idx % 100 == 0:
-                self.log_img('train_preds', batch, preds)
-
-        elif step_type in ('val', 'test'):
-            self.log(
-                name=f'{step_type}_loss',
-                value=loss,
-                on_step=False,
+        if step_type != 'pred':
+            self.log_dict(
+                losses_to_log,
+                prog_bar=True,
+                on_step=True if step_type == 'train' else False,
                 on_epoch=True,
-                batch_size=batch_size)
+                batch_size=batch.f_hourly.shape[0]
+            )
 
-            if step_type == 'val' and batch_idx == 0:
-                self.log_img('val_preds', batch, preds)
+        if step_type == 'train' and batch_idx % 100 == 0:
+            self.log_img('train/preds', batch, preds)
+        elif step_type == 'val' and batch_idx == 0:
+            self.log_img('val/preds', batch, preds)
 
         return loss, preds
 
@@ -255,50 +232,88 @@ class LightningNet(pl.LightningModule):
 
         os.makedirs(self.logger.log_dir, exist_ok=True)
         with open(os.path.join(self.logger.log_dir, 'model_summary.txt'), 'w') as f:
-            f.write(str(self))
+            f.write(self.summarize())
 
         return super().on_train_start()
 
-    def plot_preds(self, batch: BatchPattern, preds: ReturnPattern):
+    @staticmethod
+    def plot_preds(batch: BatchPattern, preds: ReturnPattern):
 
-        num_daily = batch.t_daily.shape[-1]
+        num_vars = 0
+        for var in ['daily', 'hourly']:
+            for scale in ['ts', 'msc', 'ano']:
+                scale_name = f'{var}_{scale}'
+                if getattr(preds, scale_name) is not None:
+                    num_vars += 1
 
-        fig, axes = plt.subplots(num_daily, 1, figsize=(8, num_daily), dpi=180, sharex=True, squeeze=False)
+        fig, axes = plt.subplots(num_vars, 1, figsize=(8, num_vars), dpi=180, sharex=False, squeeze=False)
 
-        for t in range(num_daily):
-            obs = batch.t_daily[0, :, t].cpu()
-            pred = preds.mean_hat[0, :, t].detach().cpu()
-            t_range = range(len(obs))
+        ax_i = -1
+        for var in ['daily', 'hourly']:
+            for scale in ['ts', 'msc', 'ano']:
+                scale_name = f'{var}_{scale}'
+                scale_name_var = f'{var}_{scale}_var'
 
-            ax = axes[t, 0]
+                pred_mean = getattr(preds, scale_name)
+                if pred_mean is None:
+                    continue
 
-            if preds.var_hat is not None:
-                var = preds.var_hat[0, :, t].detach().cpu()
-                ax.fill_between(
-                    t_range,
-                    pred - var,
-                    pred + var,
-                    alpha=0.2,
-                    color='k',
-                    label='var'
+                ax_i += 1
+                ax = axes[ax_i, 0]
+
+                pred_mean = pred_mean[0, ..., 0].detach().cpu()
+                if var == 'hourly':
+                    pred_mean = pred_mean.flatten()    
+
+                t_range = range(len(pred_mean))
+
+                pred_var = getattr(preds, scale_name_var)
+                if pred_var is not None:
+                    pred_var = pred_var[0, ..., 0].detach().cpu()         
+                    if var == 'hourly':
+                        pred_var = pred_var.flatten()           
+
+
+                obs = getattr(batch, 't_' + scale_name)[0, ..., 0].cpu()
+
+                if var == 'hourly':
+                    obs = obs.flatten()
+
+                if pred_var is not None:
+                    ax.fill_between(
+                        t_range,
+                        pred_mean - pred_var,
+                        pred_mean + pred_var,
+                        alpha=0.2,
+                        color='k',
+                        label='var',
+                        edgecolor='none'
+                    )
+
+                y_min = np.min(
+                    (np.nanmin(obs), np.nanmin(pred_mean))
+                )
+                y_max = np.max(
+                    (np.nanmax(obs), np.nanmax(pred_mean))
                 )
 
-            obs_min = np.nanmin(obs)
-            obs_max = np.nanmax(obs)
-            extra_space = (obs_max - obs_max) * 0.2
-            obs_min -= extra_space
-            obs_max += extra_space
+                extra_space = (y_max - y_min) * 0.1
+                y_min -= extra_space
+                y_max += extra_space
 
-            ax.set_ylim(obs_min, obs_max)
+                ax.set_ylim(y_min, y_max)
 
-            ax.plot(t_range, pred, color='k', lw=0.8, label='pred')
-            ax.plot(t_range, obs, color='tab:red', lw=0.5, label='obs', alpha=0.8)
+                ax.plot(t_range, pred_mean, color='k', lw=0.8, label='pred')
+                ax.plot(t_range, obs, color='tab:red', lw=1.0, label='obs', alpha=0.8)
 
-        for ax in axes[:, 0]:
+                ax.set_ylabel(f'{var} ({scale})')
+
+        for ax in axes.flat:
             ax.spines[['right', 'top', 'bottom']].set_visible(False)
             ax.axes.get_xaxis().set_visible(False)
 
         axes[0, 0].legend(loc=2)
+        fig.align_ylabels(axes[:, 0])
         plt.tight_layout()
 
         return fig
@@ -307,10 +322,49 @@ class LightningNet(pl.LightningModule):
         tensorboard = self.logger.experiment
         tensorboard.add_figure(name, self.plot_preds(batch, preds), self.trainer.global_step, close=True)
 
-    def __repr__(self) -> str:
+    def summarize(self):
         s = f'=== Summary {"=" * 31}\n'
         s += f'{str(ModelSummary(self))}\n\n'
         s += f'=== Model {"=" * 33}\n'
         s += f'{str(self)}'
 
         return s
+
+    def _check_return_variables(self, daily_out: VarStackPattern, hourly_out: VarStackPattern) -> tuple[dict, list[str], list[str] | None]:
+        daily_out = {'daily_' + key: val for key, val in daily_out._asdict().items()}
+        hourly_out = {'hourly_' + key: val for key, val in hourly_out._asdict().items()}
+        out = dict(**daily_out, **hourly_out)
+
+        vars_with_uncertainty = []
+        vars_without_uncertainty = []
+
+        for key, var in out.items():
+            if '_var' in key:
+                base_var = key.removesuffix('_var')
+                if var is not None and out[base_var] is None:
+                    raise AssertionError(
+                        f'return variable contains variance \'{key}\' but mean \'{base_var}\' is `None`.'
+                    )
+            else:
+                if out[key] is not None:  
+                    if out[key + '_var'] is None:
+                        vars_without_uncertainty.append(key)
+                    else:
+                        vars_with_uncertainty.append(key)
+
+        if int(len(vars_with_uncertainty) > 0) + int(len(vars_without_uncertainty) > 0) == 2:
+            raise AssertionError(
+                f'there are variables with variance ({vars_with_uncertainty}) and such without ({vars_without_uncertainty}), '
+                'which is not allowed. Either return variances for all variables or for none!'
+            )
+
+        has_var = len(vars_with_uncertainty) > 0
+
+        if has_var:
+            var_means = vars_with_uncertainty
+            var_uncertainties = [var + '_var' for var in vars_with_uncertainty]
+        else:
+            var_means = vars_without_uncertainty
+            var_uncertainties = None
+
+        return out, var_means, var_uncertainties

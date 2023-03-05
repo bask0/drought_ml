@@ -116,18 +116,18 @@ class TemporalBlock(nn.Module):
                                            stride=stride, padding=padding,
                                            dilation=dilation))
         self.chomp1 = Chomp1d(padding)
-        self.relu1 = nn.ReLU()
+        self.act1 = nn.Softplus()
         self.dropout1 = nn.Dropout(dropout)
 
         self.conv2 = weight_norm(nn.Conv1d(n_outputs, n_outputs, kernel_size,
                                            stride=stride, padding=padding,
                                            dilation=dilation))
         self.chomp2 = Chomp1d(padding)
-        self.relu2 = nn.ReLU()
+        self.act2 = nn.Softplus()
         self.dropout2 = nn.Dropout(dropout)
 
         self.res = Residual(n_inputs + n_static_inputs, n_outputs)
-        self.relu = nn.ReLU()
+        self.act = nn.Softplus()
         self.init_weights()
 
     def init_weights(self) -> None:
@@ -154,16 +154,16 @@ class TemporalBlock(nn.Module):
 
         out = self.conv1(x)
         out = self.chomp1(out)
-        out = self.relu1(out)
+        out = self.act1(out)
         out = self.dropout1(out)
 
         out = self.conv2(out)
         out = self.chomp2(out)
-        out = self.relu2(out)
+        out = self.act2(out)
         out = self.dropout2(out)
 
         out = self.res(out, x, s)
-        return self.relu(out)
+        return self.act(out)
 
 
 class TemporalConvNet(nn.Module):

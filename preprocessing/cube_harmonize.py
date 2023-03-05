@@ -3,7 +3,7 @@ import sys
 import os
 from argparse import ArgumentParser
 
-from preprocessing.cube_harmonize_utils import create_dummy, write_data, add_anomalies
+from preprocessing.cube_harmonize_utils import create_dummy, write_data, add_anomalies, merge_stats
 
 
 if __name__ == '__main__':
@@ -34,12 +34,17 @@ if __name__ == '__main__':
         '-f',
         '--in_file',
         type=str,
-        required=('--create' not in sys.argv) and ('--anomalies' not in sys.argv),
-        help='dataset to add to the cube. Only required if not `--create`')
+        #required=('--create' not in sys.argv) and ('--anomalies' not in sys.argv) and ('--merge_stats' not in sys.argv),
+        required=('--create' not in sys.argv) and ('--anomalies' not in sys.argv) and ('--merge_stats' not in sys.argv),
+        help='dataset to add to the cube. Only required if none `--create`, `--anomalies`, and `--merge_sats` are passed.')
     parser.add_argument(
         '--anomalies',
         type=str,
         help='if passed, anomalies are calculated for the given variable. One of `lst`, `fvc`.')
+    parser.add_argument(
+        '--merge_stats',
+        action='store_true',
+        help='if passed, the standard deviation and mean are calculated from the `<var>_stats` variables.')
     parser.add_argument(
         '--dryrun',
         action='store_true',
@@ -56,14 +61,13 @@ if __name__ == '__main__':
             raise FileNotFoundError(
                 f'`out_path={args.out_file}` is not a directory. '
                 'Initialize the dataset first with flag `--create_dataset`.')
-        if args.anomalies is None:
-            print(f'   > Writing file {args.in_file}')
+        if args.anomalies is None and args.merge_stats is False:
             write_data(in_path=args.in_file, out_path=args.out_file, dryrun=args.dryrun)
-            print('   > Done')
-        else:
+        elif args.anomalies is not None:
             if args.anomalies not in ('lst', 'fvc'):
                 raise ValueError(
                     f'argument `anomalies` must be one of (\'fvc\', \'lst\'), is {args.anomalies}.'
                 )
             add_anomalies(var=args.anomalies, out_path=args.out_file, dryrun=args.dryrun, num_proc=12)
-            print('   > Done')
+        else:
+            merge_stats(out_path=args.out_file)

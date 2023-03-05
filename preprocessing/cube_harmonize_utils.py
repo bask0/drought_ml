@@ -11,6 +11,7 @@ import math
 from typing import Union
 from tqdm import tqdm
 import multiprocessing as mpl
+import os
 
 CHUNKS = {'time': 300, 'lat': 20, 'lon': 20}
 CHUNKS_MSC = {'dayofyear': 366, 'lat': 20, 'lon': 20}
@@ -132,6 +133,29 @@ def rename_to_lower(x: Union[xr.Dataset, xr.DataArray]) -> Union[xr.Dataset, xr.
     return x
 
 
+def add_stats_group(path: str, group_name: str):
+    z = zarr.open(path)
+    z.create_group(group_name.lower() + '_stats')
+
+
+def add_stats(path: str, group_name: str, array_name: str, array: xr.DataArray):
+    z = zarr.open(path)
+    g = z[group_name.lower() + '_stats']
+
+    if isinstance(array, xr.Dataset):
+        g[array_name] = [
+            array.notnull().sum().compute().to_array().item(),
+            array.sum().compute().to_array().item(),
+            (array ** 2).sum().compute().to_array().item(),
+        ]
+    else:
+        g[array_name] = [
+            array.notnull().sum().compute().item(),
+            array.sum().compute().item(),
+            (array ** 2).sum().compute().item(),
+        ]
+
+
 def hourly2dayhour(x: Union[xr.Dataset, xr.DataArray]) -> Union[xr.Dataset, xr.DataArray]:
     x.coords['time'] = pd.MultiIndex.from_arrays(
         arrays=[pd.to_datetime(x.time.dt.date), x.time.dt.hour.values],
@@ -156,6 +180,7 @@ def create_dummy(start_year: int, end_year: int, out_path: str) -> None:
     for path in get_data_paths(scales=['hourly'], years=['2004'], months=['01']):
         ds_orig = xr.open_dataset(path)
         var = list(ds_orig.data_vars)[0]
+
         ds = ds_orig.chunk().pipe(xr.zeros_like).isel(time=0, drop=True).expand_dims(
             time=times, hour=hours)[var].pipe(rename).transpose(*CHUNKS_ORDER, missing_dims='ignore')
         dummy[var.lower()] = ds
@@ -167,7 +192,6 @@ def create_dummy(start_year: int, end_year: int, out_path: str) -> None:
             variables.append('lst_msc')
             dummy['lst_ano'] = ds
             variables.append('lst_ano')
-
 
     for path in get_data_paths(scales=['daily'], years=['2004'], months=['01']):
         ds_orig = xr.open_dataset(path)
@@ -192,9 +216,9 @@ def create_dummy(start_year: int, end_year: int, out_path: str) -> None:
 
     for var in variables:
         var_lower = var.lower()
-        scaling, data_min, data_max = get_scale_and_offset(var)
-        dummy[var_lower].attrs['data_min'] = data_min
-        dummy[var_lower].attrs['data_max'] = data_max
+        #scaling, data_min, data_max = get_scale_and_offset(var)
+        #dummy[var_lower].attrs['data_min'] = data_min
+        #dummy[var_lower].attrs['data_max'] = data_max
         if 'dayofyear' in dummy[var_lower].dims:
             if 'hour' in  dummy[var_lower].dims:
                 chunking = tuple(CHUNKS_HOURLY_MSC.values())
@@ -209,14 +233,17 @@ def create_dummy(start_year: int, end_year: int, out_path: str) -> None:
         encoding[var_lower] = {
             'compressor': compressor,
             'chunks': chunking,
-            '_FillValue': -32767,
-            'dtype': 'int16',
-            'scale_factor': scaling['scale_factor'],
-            'add_offset': scaling['add_offset']
+            'dtype': 'float32',
+            #'_FillValue': -32767,
+            #'dtype': 'int16',
+            #'scale_factor': scaling['scale_factor'],
+            #'add_offset': scaling['add_offset']
         }
 
     dummy.to_zarr(out_path, compute=False, encoding=encoding, mode='w')
 
+    for var in variables:
+        add_stats_group(path=out_path, group_name=var)
 
 def calculate_anomaly(x: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]:
     gb = x.groupby('time.dayofyear')
@@ -233,7 +260,7 @@ def calculate_anomaly(x: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]:
     return msc_smooth, anomalies
 
 
-def batch_calculate_anomaly(var: str, out_path: str, lat_subset: slice | None = None) -> None:
+def batch_calculate_anomaly(var: str, uid: str, out_path: str, lat_subset: slice | None = None) -> None:
 
     dummy = xr.open_zarr(out_path)
 
@@ -253,8 +280,8 @@ def batch_calculate_anomaly(var: str, out_path: str, lat_subset: slice | None = 
         np.concatenate((np.zeros(1, dtype=int), np.cumsum(da.chunksizes['lon']))), 2)
 
     with tqdm(desc=f'   > Anomalies: {var.lower()}', total=len(lat_chunk_bounds) * len(lon_chunk_bounds)) as pbar:
-        for lat_chunk_bound in lat_chunk_bounds:
-            for lon_chunk_bound in lon_chunk_bounds:
+        for lat_i, lat_chunk_bound in enumerate(lat_chunk_bounds):
+            for lon_i, lon_chunk_bound in enumerate(lon_chunk_bounds):
                 lat_slice = slice(*lat_chunk_bound)
                 lon_slice = slice(*lon_chunk_bound)
 
@@ -294,6 +321,10 @@ def batch_calculate_anomaly(var: str, out_path: str, lat_subset: slice | None = 
                         'lon': lon_slice
                     })
 
+                array_name = f'{uid}_{lat_i}_{lon_i}'
+                add_stats(path=out_path, group_name=f'{var.lower()}_msc', array_name=array_name, array=msc)
+                add_stats(path=out_path, group_name=f'{var.lower()}_ano', array_name=array_name, array=ano)
+
                 pbar.update(1)
 
 
@@ -302,7 +333,7 @@ def add_anomalies(var: str, out_path: str, dryrun: bool = False, num_proc: int =
         return
 
     if num_proc == 0:
-        batch_calculate_anomaly(var=var, out_path=out_path)
+        batch_calculate_anomaly(var=var, uid='0000', out_path=out_path)
         return
 
     # Split longitude into num_proc parts.
@@ -316,7 +347,7 @@ def add_anomalies(var: str, out_path: str, dryrun: bool = False, num_proc: int =
         under_limit = chunks[-1]
 
     #for slices_subset in [slices[0::2], slices[1::2]]:
-    iter_items = [(var, out_path, lat_slice) for lat_slice in slices]
+    iter_items = [(var, f'{uid:04d}', out_path, lat_slice) for uid, lat_slice in enumerate(slices)]
 
     with mpl.Pool(num_proc) as pool:
         pool.starmap(batch_calculate_anomaly, iter_items)
@@ -335,7 +366,7 @@ def write_data(in_path: str, out_path: str, dryrun: bool = False) -> None:
 
         STATIC_CHUNKS = CHUNKS.copy()
         STATIC_CHUNKS.pop('time')
-        compressor = zarr.Blosc(cname="zlib", clevel=2, shuffle=1)
+        compressor = zarr.Blosc(cname='zlib', clevel=2, shuffle=1)
 
         encoding = {}
 
@@ -402,8 +433,8 @@ def write_data(in_path: str, out_path: str, dryrun: bool = False) -> None:
                 'dtype': 'float32',
             }
 
-            data[var].attrs['data_min'] = data[var].min().compute().item()
-            data[var].attrs['data_max'] = data[var].max().compute().item()
+            data[var].attrs['mean'] = data[var].mean().compute().item()
+            data[var].attrs['std'] = data[var].std().compute().item()
 
         data = data.transpose(*CHUNKS_ORDER, missing_dims='ignore').compute()
 
@@ -467,23 +498,46 @@ def write_data(in_path: str, out_path: str, dryrun: bool = False) -> None:
         if 't2m' in data.data_vars:
             data['t2m'] = data['t2m'] - 273.15
 
+        # Compute mean.
+        for var in data.data_vars:
+            array_name = os.path.basename(data.encoding['source']).removesuffix('.nc')
+            add_stats(path=out_path, group_name=var, array_name=array_name, array=data)
+
         with dask.config.set(**{'array.slicing.split_large_chunks': False}):
             data.to_zarr(out_path, consolidated=True, region={'time': time_slice})
 
 
-if __name__ == '__main__':
+def merge_stats(out_path: str) -> None:
+    z = zarr.open(out_path)
 
-    create_dummy(
-        start_year=2002,
-        end_year=2004,
-        out_path='./test.zarr')
+    for key, values in z.groups():
+        if '_stats' in key:
+            var_key = key.removesuffix('_stats')
+            if var_key not in z.array_keys():
+                raise KeyError(
+                    f'no corresponding variable `{var_key}` found for stats `{key}`.'
+                )
 
-    write_data(
-        in_path='/Net/Groups/BGI/scratch/bkraft/drought_data/preproc/t2m.hourly.1460.1140.02.2004.nc',
-        out_path='./test.zarr/'
-    )
+            n = 0.
+            s = 0.
+            s2 = 0.
+            if len(list(values.arrays())):
+                for arr_key, arr in values.arrays():
+                    n += arr[0]
+                    s += arr[1]
+                    s2 += arr[2]
 
-    write_data(
-        in_path='/Net/Groups/BGI/scratch/bkraft/drought_data/preproc/wtd.static.1460.1140.nc',
-        out_path='./test.zarr/'
-    )
+                mn = s / n
+                sd = ((s2 / n) - (s / n) ** 2) ** 0.5
+
+                z[var_key].attrs['mean'] = mn
+                z[var_key].attrs['std'] = sd
+
+                z.store.rmdir(key)
+
+            else:
+                raise RuntimeError(
+                    f'no stats found in `{key}`.'
+                )
+
+    zarr.consolidate_metadata(out_path)

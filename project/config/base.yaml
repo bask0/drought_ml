@@ -1,10 +1,8 @@
 seed_everything: 99
 data:
   fold_id: 0
-  target_daily:
-    - 'fvc'
-    - 'fvc_ano'
-  batch_size: 24
+  target_daily: 'fvc'
+  batch_size: 100
   chunk_buffer_size: 4
   num_queue_workers: 12
 trainer:
@@ -14,26 +12,33 @@ trainer:
   num_sanity_val_steps: 0
   log_every_n_steps: 1
   val_check_interval: 0.1
-  accumulate_grad_batches: 5
   max_epochs: 100
   num_nodes: 1
   detect_anomaly: false
   callbacks:
-    - class_path: utils.pl_utils.OutputWriter
+    - class_path: project.utils.pl_utils.OutputWriter
     - class_path: pytorch_lightning.callbacks.EarlyStopping
       init_args:
-        monitor: 'val_loss'
-        patience: 20
+        monitor: 'val/loss'
+        patience: 15
         min_delta: 0.0
         mode: 'min'
     - class_path: pytorch_lightning.callbacks.TQDMProgressBar
       init_args:
-        refresh_rate: 100
+        refresh_rate: 20
+    - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+      init_args:
+        monitor: 'val/loss'
+        mode: min
+        filename: 'best'
+        save_last: true
+        save_top_k: 1
   logger:
     class_path: pytorch_lightning.loggers.TensorBoardLogger
     init_args:
-      save_dir: null
+      save_dir: './logs'
       version: null
+      name: ''
   plugins:
     - class_path: pytorch_lightning.plugins.environments.SLURMEnvironment
       init_args:
@@ -41,5 +46,5 @@ trainer:
 optimizer:
   class_path: torch.optim.AdamW
   init_args:
-    lr: 0.0001
-    weight_decay: 0.0
+    lr: 0.001
+    weight_decay: 0.1

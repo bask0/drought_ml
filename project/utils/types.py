@@ -21,19 +21,43 @@ class Coords(NamedTuple):
     window_start: str
     window_end: str
     num_days: int
+    dayofyear: list[int]
+
+
+class VarStackPattern(NamedTuple):
+    ts: Tensor | None
+    msc: Tensor | None
+    ano: Tensor | None
+    ts_var: Tensor | None
+    msc_var: Tensor | None
+    ano_var: Tensor | None
 
 
 class BatchPattern(NamedTuple):
     f_hourly: Tensor
     f_static: Tensor
-    t_hourly: Tensor
-    t_daily: Tensor
+    t_hourly_ts: Tensor
+    t_hourly_msc: Tensor
+    t_hourly_ano: Tensor
+    t_daily_ts: Tensor
+    t_daily_msc: Tensor
+    t_daily_ano: Tensor
     coords: Coords
 
 
 class ReturnPattern(NamedTuple):
-    mean_hat: Tensor
-    var_hat: Tensor
+    daily_ts: Tensor
+    daily_ts_var: Tensor
+    daily_msc: Tensor
+    daily_msc_var: Tensor
+    daily_ano: Tensor
+    daily_ano_var: Tensor
+    hourly_ts: Tensor
+    hourly_ts_var: Tensor
+    hourly_msc: Tensor
+    hourly_msc_var: Tensor
+    hourly_ano: Tensor
+    hourly_ano_var: Tensor
     coords: Coords
 
 

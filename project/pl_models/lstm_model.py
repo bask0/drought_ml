@@ -3,9 +3,10 @@ from torch import nn
 from torch import Tensor
 
 from project.pl_models.base_model import LightningNet
-from modules.lstm import LSTM
-from modules.feedforward import FeedForward
-from utils.torch_utils import Transform, EncodeHourlyToDaily
+from project.modules.lstm import LSTM
+from project.modules.feedforward import FeedForward
+from project.utils.torch_utils import EncodeHourlyToDaily, Transform
+from project.utils.types import VarStackPattern
 
 
 class LSTMPL(LightningNet):
@@ -13,13 +14,13 @@ class LSTMPL(LightningNet):
             self,
             num_inputs: int,
             num_geofactors: int,
-            num_outputs: int,
             num_hidden: int,
             num_layers: int,
             dropout: float,
             static_dropout: float,
             num_meteo_enc: int = 10,
-            num_geofactors_enc: int = 6,
+            num_geofactors_enc: int = 3,
+            predict_msc: bool = False,
             predict_var: bool = False,
             **kwargs) -> None:
         """Implements a long short-term memory model (LSTM).
@@ -36,8 +37,6 @@ class LSTMPL(LightningNet):
                 The number input dimensionality.
             num_geofactors:
                 The number of static features.
-            num_outputs:
-                The output dimensionality.
             num_hidden:
                 The number of hidden units.
             num_layers:
@@ -50,6 +49,8 @@ class LSTMPL(LightningNet):
                 The meteorology encoding dimensionality.
             num_geofactors_enc:
                 The geofactor encoding dimensionality.
+            predict_msc:
+                Whether to predict the MSC.
             predict_var:
                 Whether to predict uncertainty, default is False.
             **kwargs:
@@ -59,6 +60,7 @@ class LSTMPL(LightningNet):
 
         super().__init__(**kwargs)
 
+        self.predict_msc = predict_msc
         self.predict_var = predict_var
 
         self.encode_static = FeedForward(
@@ -80,32 +82,37 @@ class LSTMPL(LightningNet):
             outpout_channel_last=True
         )
 
+        num_out = 1 * (int(predict_var) + 1) * (int(predict_msc) + 1)
+        num_hidden_lstm = num_hidden * num_out
+
         self.lstm = LSTM(
             num_inputs=num_meteo_enc,
             num_static_inputs=num_geofactors_enc,
             num_outputs=-1,
-            num_hidden=num_hidden,
+            num_hidden=num_hidden_lstm,
             num_layers=num_layers,
-            dropout=dropout
+            dropout=0.0
         )
 
-        self.mean_output_layer = nn.Linear(
-            in_features=num_hidden,
-            out_features=num_outputs
+        self.to_sequence_last = Transform(transform_fun=lambda x: x.transpose(1, 2))
+
+        self.output_layer = nn.Conv1d(
+            in_channels=num_hidden_lstm,
+            out_channels=num_out,
+            kernel_size=1,
+            groups=num_out
         )
+
+        self.to_channel_last = Transform(transform_fun=lambda x: x.transpose(1, 2))
+
+        self.split_outputs = Transform(transform_fun=lambda x: x.split(split_size=1, dim=-1))
 
         if self.predict_var:
-            self.var_output_layer = nn.Sequential(
-                nn.Linear(
-                    in_features=num_hidden,
-                    out_features=num_outputs
-                ),
-                nn.Softplus()
-            )
+            self.softplus = nn.Softplus()
 
         self.save_hyperparameters()
 
-    def forward(self, x: Tensor, s: Tensor | None = None) -> tuple[Tensor, Tensor]:
+    def forward(self, x: Tensor, x_msc: Tensor | None = None, x_ano: Tensor | None = None, time: Tensor | None = None, s: Tensor | None = None) -> tuple[Tensor, Tensor]:
         """Model forward call.
 
         Args:
@@ -126,13 +133,55 @@ class LSTMPL(LightningNet):
         # (B, S, FD*), (B, FS*) -> (B, S, D)
         out, _ = self.lstm(out, s)
 
-        # (B, S, D) -> (B, S, O)
-        out_mean = self.mean_output_layer(out)
+        # (B, S, D) -> (B, D, S)
+        out = self.to_sequence_last(out)
 
-        if self.predict_var:
-            # (B, D, HxS) -> (B, S, O)
-            out_var = self.var_output_layer(out)
+        # (B, D, S) -> (B, O, S)
+        out = self.output_layer(out)
+
+        # (B, O, S) -> (B, S, O)
+        out = self.to_channel_last(out)
+
+        # (B, S, O) -> O x (B, S, 1)
+        out = self.split_outputs(out)
+
+        if self.predict_msc:
+            if self.predict_var:
+                msc, msc_var, ano, ano_var = out
+                msc_var = self.softplus(msc_var)
+                ano_var = self.softplus(ano_var)
+            else:
+                msc, ano = out
+                msc_var = None
+                ano_var = None
         else:
-            out_var = None
+            if self.predict_var:
+                ano, ano_var = out
+                msc = None
+                msc_var = None
+                ano_var = self.softplus(ano_var)
+            else:
+                ano, = out
+                ano_var = None
+                msc = None
+                msc_var = None
 
-        return out_mean, out_var
+        daily_out = VarStackPattern(
+            ts=None,
+            msc=msc,
+            ano=ano,
+            ts_var=None,
+            msc_var=msc_var,
+            ano_var=ano_var
+        )
+
+        hourly_out = VarStackPattern(
+            ts=None,
+            msc=None,
+            ano=None,
+            ts_var=None,
+            msc_var=None,
+            ano_var=None
+        )
+
+        return daily_out, hourly_out

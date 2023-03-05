@@ -2,30 +2,26 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import BasePredictionWriter
 import xarray as xr
 import os
-import shutil
+from time import sleep
 import numpy as np
 import torch.multiprocessing as mp
 from torch import Tensor
 from collections import namedtuple
 from typing import Any, Sequence
+from zarr.errors import ContainsArrayError, ContainsGroupError
 
-from dataset import QueueFiller
-from utils.types import ReturnPattern
+from project.dataset import DataQueue, QueueFiller, DataChunk
+from project.utils.types import ReturnPattern
 
 
 class OutputWriter(BasePredictionWriter):
     """Output writer to use as callback in prediction mode."""
-    def __init__(
-            self,
-            overwrite: bool | str = True) -> None:
+    def __init__(self) -> None:
         """Initialize OutputWriter.
 
         Results are written to the trainer logging directory as `predictions.zarr`. Predictions
-        are expected in `ReturnPattern` format. Note that `ReturnPattern.var_hat` (the optional
-        uncertainties) may be `None`. In this case, no variable is created for uncertainties and
-        only the mean is written to file. For each target, the resulting zarr file has the variables
-        - '<target>_hat' (mean)
-        - '<target>_vhat' (optional variance)
+        are expected in `ReturnPattern` format. Note that BatchPattern variables may be `None` and
+        in this case, no variable is created for that variable.
 
         Example:
         >>> pred_writer = OutputWriter()
@@ -33,13 +29,8 @@ class OutputWriter(BasePredictionWriter):
         >>> model = MyModel()
         >>> trainer.predict(model, return_predictions=False)
 
-        Args:
-            overwrite: if `True` (default), existing predictions are overridden. Else, an error
-                is raised if the target exists.
         """
         super().__init__(write_interval='batch')
-
-        self.overwrite = overwrite
 
         self.targets: list[str] = None
         self.zarr_file: xr.Dataset | None = None
@@ -61,9 +52,8 @@ class OutputWriter(BasePredictionWriter):
             dataloader_idx: int) -> None:
 
         if self.zarr_file is None:
-            self.has_variance = prediction.var_hat is not None
             chunk_size = self.init_zarr(
-                trainer=trainer, dataloader_idx=dataloader_idx, has_variance=self.has_variance)
+                predictions=prediction, trainer=trainer, dataloader_idx=dataloader_idx)
             self.chunk_bounds_lat = QueueFiller.coords2bounds(self.mask, dim='lat', chunk_size=chunk_size)
             self.chunk_bounds_lon = QueueFiller.coords2bounds(self.mask, dim='lon', chunk_size=chunk_size)
 
@@ -80,8 +70,8 @@ class OutputWriter(BasePredictionWriter):
 
                 chunk_ds = self.get_target_like(
                     self.zarr_file.isel(lat=lat_bounds, lon=lon_bounds),
-                    has_variance=self.has_variance,
-                    use_orig_name=False
+                    variables=list(self.var_map.values()),
+                    use_new_names=True
                 )
 
                 self.chunks[chunk_id] = {
@@ -92,23 +82,40 @@ class OutputWriter(BasePredictionWriter):
                     'lon_bounds': lon_bounds
                 }
 
-            for target_i, target in enumerate(self.targets):
+            for key, var in self.var_map.items():
+                el = getattr(i_pred, key)[-i_pred.coords.num_days:, ..., 0]
+                el = DataChunk.normalize_var(
+                    x=el, stats=self.data_scaling[var.removesuffix('_hat').removesuffix('_var')], invert=True, is_uncertainty='_var' in var
+                )
+
                 self.chunks[chunk_id]['ds'][
-                    self.get_target_pred_name(name=target, is_variance=False)
+                    var
                 ].loc[{
                     'lat': i_pred.coords.lat,
                     'lon': i_pred.coords.lon,
-                    'time': slice(i_pred.coords.window_start, i_pred.coords.window_end)}] =\
-                            i_pred.mean_hat[-i_pred.coords.num_days:, ..., target_i]
+                    'time': slice(i_pred.coords.window_start, i_pred.coords.window_end)}] = el
 
-                if self.has_variance:
-                    self.chunks[chunk_id]['ds'][
-                        self.get_target_pred_name(name=target, is_variance=True)
-                    ].loc[{
-                        'lat': i_pred.coords.lat,
-                        'lon': i_pred.coords.lon,
-                        'time': i_pred.coords.time_slice}] =\
-                            i_pred.var_hat[-i_pred.coords.num_days:, ..., target_i]
+            # for target_i, target in enumerate(self.targets):
+            #     pred_mean = i_pred.mean_hat[-i_pred.coords.num_days:, ..., target_i]
+            #     pred_mean = DataChunk.normalize_var(x=pred_mean, stats=self.data_scaling[target], invert=True)
+
+            #     self.chunks[chunk_id]['ds'][
+            #         self.get_target_pred_name(name=target, is_variance=False)
+            #     ].loc[{
+            #         'lat': i_pred.coords.lat,
+            #         'lon': i_pred.coords.lon,
+            #         'time': slice(i_pred.coords.window_start, i_pred.coords.window_end)}] = pred_mean
+
+            #     if self.has_variance:
+            #         pred_var = i_pred.var_hat[-i_pred.coords.num_days:, ..., target_i]
+            #         pred_var = DataChunk.normalize_var(x=pred_var, stats=self.data_scaling[target], invert=True, is_uncertainty=True)
+
+            #         self.chunks[chunk_id]['ds'][
+            #             self.get_target_pred_name(name=target, is_variance=True)
+            #         ].loc[{
+            #             'lat': i_pred.coords.lat,
+            #             'lon': i_pred.coords.lon,
+            #             'time': i_pred.coords.time_slice}] = pred_var
 
             self.chunks[chunk_id]['num_saved'] += 1
 
@@ -150,55 +157,88 @@ class OutputWriter(BasePredictionWriter):
         })
 
     def init_zarr(
-            self, trainer: 'pl.Trainer',
-            dataloader_idx: int,
-            has_variance: bool) -> tuple[str, xr.Dataset, xr.DataArray, np.typing.ArrayLike, int]:
+            self,
+            predictions: ReturnPattern,
+            trainer: 'pl.Trainer',
+            dataloader_idx: int) -> tuple[str, xr.Dataset, xr.DataArray, np.typing.ArrayLike, int]:
 
-        zarr_dir = os.path.join(trainer.log_dir, 'predictions.zarr')
+        zarr_dir = os.path.join(os.path.dirname(trainer.log_dir), 'predictions.zarr')
 
-        if os.path.isdir(zarr_dir):
-            if self.overwrite:
-                shutil.rmtree(zarr_dir)
-
-            else:
-                raise FileExistsError(
-                    f'The zar file {zarr_dir} already exists. Set `OutputWriter(..., overwrite=True)` '
-                    'to overwrite the file.'
-                )
-
-        dataset = trainer.predict_dataloaders[dataloader_idx].dataset
+        dataset: DataQueue = trainer.predict_dataloaders[dataloader_idx].dataset
         data = dataset.data
 
-        missing_targets = []
-        for target in self.targets:
-            if not target in data.data_vars:
-                missing_targets.append(target)
+        if len(dataset.target_daily) > 0:
+            target_daily = dataset.target_daily[0]
+        else:
+            target_daily = 'daily'
+        if len(dataset.target_hourly) > 0:
+            target_hourly = dataset.target_hourly[0]
+        else:
+            target_hourly = 'hourly'
 
-        if len(missing_targets) > 0:
-            raise KeyError(
-                f'some target(s) missing in dataset: {missing_targets}.'
-            )
+        # Contains mapping from prediction names to xr variable names for present variables.
+        self.var_map = {
+            key: key.replace(
+                'daily', target_daily
+            ).replace(
+                'hourly', target_hourly
+            ).removesuffix(
+                '_ts'
+            ) + '_hat' for key, val in predictions._asdict().items() if val is not None and key != 'coords'
+        }
 
-        dummy = self.get_target_like(data, has_variance=has_variance, use_orig_name=True)
-        dummy.to_zarr(zarr_dir, compute=False)
+        dummy = self.get_target_like(data, list(self.var_map.values()), use_new_names=False)
 
-        self.targets = dataset.targets
+        # Shaky workaround to avoid race condition :/
+        try:
+            dummy.to_zarr(zarr_dir, compute=False, mode='a')
+        except (ContainsGroupError, ContainsArrayError) as e:
+            sleep(10)
+
+        # self.targets = dataset.targets
+
+        # missing_targets = []
+        # for target in self.targets:
+        #     if not target in data.data_vars:
+        #         missing_targets.append(target)
+
+        # if len(missing_targets) > 0:
+        #     raise KeyError(
+        #         f'some target(s) missing in dataset: {missing_targets}.'
+        #     )
+
+        # dummy = self.get_target_like(data, has_variance=has_variance, use_orig_name=True)
+        # dummy.to_zarr(zarr_dir, compute=False)
+
         self.zarr_file = xr.open_zarr(zarr_dir)
         self.mask = dataset.mask
         self.chunk_coords = dataset.chunk_coords
         self.num_year_samples = dataset.num_year_samples
+        self.data_scaling = dataset.data_scaling
 
         return dataset.chunk_size
 
-    def get_target_like(self, data: xr.Dataset, has_variance: bool, use_orig_name: bool) -> xr.Dataset:
+    def get_target_like(self, data: xr.Dataset, variables: list[str], use_new_names: bool) -> xr.Dataset:
         dummy = xr.Dataset()
-        for target in self.targets:
-            name = target if use_orig_name else self.get_target_pred_name(name=target, is_variance=False)
-            dummy[self.get_target_pred_name(name=target, is_variance=False)] = data[name]
-            if has_variance:
-                dummy[self.get_target_pred_name(name=target, is_variance=True)] = data[name]
+        for target in variables:
+            if use_new_names:
+                obs_name = target
+            else:
+                obs_name = target.removesuffix('_hat').removesuffix('_msc').removesuffix('_ano')
+
+            dummy[target] = data[obs_name]
 
         return xr.full_like(dummy, fill_value=np.nan)
+
+    # def get_target_like(self, data: xr.Dataset, has_variance: bool, use_orig_name: bool) -> xr.Dataset:
+    #     dummy = xr.Dataset()
+    #     for target in self.targets:
+    #         name = target if use_orig_name else self.get_target_pred_name(name=target, is_variance=False)
+    #         dummy[self.get_target_pred_name(name=target, is_variance=False)] = data[name]
+    #         if has_variance:
+    #             dummy[self.get_target_pred_name(name=target, is_variance=True)] = data[name]
+
+    #     return xr.full_like(dummy, fill_value=np.nan)
 
     @staticmethod
     def get_target_pred_name(name: str, is_variance: bool) -> bool:

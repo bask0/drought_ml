@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Sort does sort first sort by month, then by year. This separates consecutive months of the same variable
+# Sort does sort first by month, then by year. This separates consecutive months of the same variable
 # to avoid race condition (if chunks overlap months). Don't use less than four years because this could still
 # cause race condition.
 FILES=($(ls -1 /Net/Groups/BGI/scratch/bkraft/drought_data/preproc/*.static.1460.1140.nc))
@@ -43,6 +43,12 @@ echo ">>> Computing anomalies..."
 python preprocessing/cube_harmonize.py \
       -o /Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr \
       --anomalies fvc
+
+python preprocessing/cube_harmonize.py \
+      -o /Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr \
+      --anomalies lst
+
+echo ">>> Merging stats..."
 
 python preprocessing/cube_harmonize.py \
       -o /Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr \

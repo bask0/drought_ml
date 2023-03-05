@@ -1,9 +1,8 @@
 model:
   class_path: project.pl_models.tcn_model.TemporalConvNetPL
   init_args:
-    num_outputs: 1
     num_hidden: 32
-    num_layers: 6
+    num_layers: 1
     dropout: 0.1
     static_dropout: 0.1
-    kernel_size: 24
+    kernel_size: 6

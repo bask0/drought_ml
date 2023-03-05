@@ -2,7 +2,7 @@
 # job.sbatch
 #
 #SBATCH -J dataprep # A single job name for the array
-#SBATCH -p work # partition
+#SBATCH -p big # partition
 #SBATCH --cpus-per-task=5 # 5 cores
 #SBATCH --mem-per-cpu=5G
 #SBATCH --ntasks=1

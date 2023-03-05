@@ -2,7 +2,7 @@
 from argparse import ArgumentParser
 import xarray as xr
 import numpy as np
-import json
+from scipy import ndimage
 
 
 def get_slice_from_anchor(
@@ -38,6 +38,57 @@ def get_slice_from_anchor(
     }
 
 
+# def get_fold_mask(
+#         mask: xr.DataArray,
+#         lat_grid_size: int,
+#         lon_grid_size: int,
+#         lat_chunk_size: int = 20,
+#         lon_chunk_size: int = 20):
+#     lat_grid_size = lat_grid_size * lat_chunk_size
+#     lon_grid_size = lon_grid_size * lon_chunk_size
+#     num_lat_rep = int(np.ceil(len(mask.lat) / lat_grid_size / 2))
+#     num_lon_rep = int(np.ceil(len(mask.lon) / lon_grid_size / 2))
+
+#     re = np.r_[num_lon_rep * [0, 1]]  # even-numbered rows
+#     ro = np.r_[num_lon_rep * [2, 3]]  # odd-numbered rows
+#     checkboard = np.row_stack(num_lat_rep * (re, ro))
+#     checkboard = checkboard.repeat(
+#         lat_grid_size, axis=0).repeat(lon_grid_size, axis=1)[:len(mask.lat), :len(mask.lon)] + 1
+
+#     mask = mask.where(mask.lon > -25, False)
+#     mask = mask.where((mask.lat <= 16.5) | (mask.lat > 32.5), False)
+#     mask = mask.where((mask.lat < 60) | (mask.lon > 0), False)
+
+#     blocks = xr.zeros_like(mask, dtype=int)
+#     blocks.values = checkboard
+#     blocks = blocks.where(mask, False)
+
+#     return blocks
+
+def get_fold_mask(
+        mask: xr.DataArray,
+        num_folds: int = 12,
+        lat_chunk_size: int = 20,
+        lon_chunk_size: int = 20):
+
+    blocks = mask.copy().astype(int)
+
+    num_lat_rep = int(np.ceil(len(mask.lat) / lat_chunk_size))
+    num_lon_rep = int(np.ceil(len(mask.lon) / lon_chunk_size))
+
+    for i in range(-num_lat_rep, num_lon_rep + 1):
+        diag = np.eye(num_lat_rep, num_lon_rep, i, dtype=bool).repeat(
+            lat_chunk_size, axis=0).repeat(lon_chunk_size, axis=1)
+        blocks.values[diag] = (i % num_folds) + 1
+
+    blocks = blocks.where(mask, 0)
+    blocks = blocks.where(mask.lon > -25, 0)
+    blocks = blocks.where((mask.lat <= 16.5) | (mask.lat > 32.5), 0)
+    blocks = blocks.where((mask.lat < 60) | (mask.lon > 0), 0)
+
+    return blocks.compute()
+
+
 def compute_mask(path):
 
     ds = xr.open_zarr(path)
@@ -64,48 +115,29 @@ def compute_mask(path):
 
     common_mask = (mask_static * mask_dynamic * mask_fvc * mask_lst).drop(['time', 'hour']).compute()
 
-    with open('./project/rois.json', 'r') as f:
-        rois_json = json.load(f)
-
-    rois = []
-
-    for _, val in rois_json.items():
-        rois.extend(val)
+    common_mask.values[:] = ndimage.binary_opening(common_mask.values, iterations=2)
 
     lat_chunk = ds.fvc.encoding['preferred_chunks']['lat']
     lon_chunk = ds.fvc.encoding['preferred_chunks']['lon']
 
+    blocks = get_fold_mask(
+        mask=common_mask,
+        lat_chunk_size=lat_chunk,
+        lon_chunk_size=lon_chunk
+    )
+
     mask = xr.Dataset()
     mask['mask'] = common_mask.chunk({'lat': lat_chunk, 'lon': lon_chunk})
-    mask['fold_mask'] = xr.zeros_like(common_mask).expand_dims(fold=np.arange(6)).copy().chunk(
-        {'fold': 1, 'lat': lat_chunk, 'lon': lon_chunk})
-
-    roi_attr = {}
-    for fold in range(6):
-        fold_rois = [get_slice_from_anchor(common_mask, *roi) for roi in rois[fold::6]]
-        for r, fold_roi in enumerate(fold_rois):
-            mask['fold_mask'].loc[{**fold_roi, 'fold': fold}] = True
-            roi_attr.update(
-                {
-                    f'roi_{fold}_{r}': [
-                        [fold_roi['lon'].start, fold_roi['lon'].stop],
-                        [fold_roi['lat'].start, fold_roi['lat'].stop]
-                    ]
-                }
-            )
-
-    mask['fold_mask'] = mask['fold_mask'] * mask['mask']
-    mask['fold_mask'].attrs = roi_attr
+    mask['fold_mask'] = blocks.chunk({'lat': lat_chunk, 'lon': lon_chunk})
 
     encoding = {}
 
-    for var, chunking in zip(
-            ['mask', 'fold_mask'], [(lat_chunk, lon_chunk), (1, lat_chunk, lon_chunk)]):
+    for var in ['mask', 'blocks']:
         encoding[var] = {
-            'chunks': chunking,
+            'chunks': (lat_chunk, lon_chunk,),
         }
 
-    mask.to_zarr(path, mode='a')
+    mask.to_zarr(path, mode='a', consolidated=True)
 
 
 if __name__ == '__main__':
