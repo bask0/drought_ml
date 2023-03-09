@@ -74,7 +74,7 @@ if __name__ == '__main__':
     cv_cmd_script_path = cluster.init_run(
         search_space_file=args.search_space,
         run_type='cv',
-        num_trials=4  # num folds
+        num_trials=12  # num folds
     )
 
     # Print config to file (remove file if fails).
