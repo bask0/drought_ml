@@ -65,9 +65,32 @@ def get_slice_from_anchor(
 
 #     return blocks
 
+# def get_fold_mask(
+#         mask: xr.DataArray,
+#         num_folds: int = 12,
+#         lat_chunk_size: int = 20,
+#         lon_chunk_size: int = 20):
+
+#     blocks = mask.copy().astype(int)
+
+#     num_lat_rep = int(np.ceil(len(mask.lat) / lat_chunk_size))
+#     num_lon_rep = int(np.ceil(len(mask.lon) / lon_chunk_size))
+
+#     for i in range(-num_lat_rep, num_lon_rep + 1):
+#         diag = np.eye(num_lat_rep, num_lon_rep, i, dtype=bool).repeat(
+#             lat_chunk_size, axis=0).repeat(lon_chunk_size, axis=1)
+#         blocks.values[diag] = (i % num_folds) + 1
+
+#     blocks = blocks.where(mask, 0)
+#     blocks = blocks.where(mask.lon > -25, 0)
+#     blocks = blocks.where((mask.lat <= 16.5) | (mask.lat > 32.5), 0)
+#     blocks = blocks.where((mask.lat < 60) | (mask.lon > 0), 0)
+
+#     return blocks.compute()
+
 def get_fold_mask(
         mask: xr.DataArray,
-        num_folds: int = 12,
+        num_folds: int = 10,
         lat_chunk_size: int = 20,
         lon_chunk_size: int = 20):
 
@@ -76,15 +99,22 @@ def get_fold_mask(
     num_lat_rep = int(np.ceil(len(mask.lat) / lat_chunk_size))
     num_lon_rep = int(np.ceil(len(mask.lon) / lon_chunk_size))
 
-    for i in range(-num_lat_rep, num_lon_rep + 1):
-        diag = np.eye(num_lat_rep, num_lon_rep, i, dtype=bool).repeat(
-            lat_chunk_size, axis=0).repeat(lon_chunk_size, axis=1)
-        blocks.values[diag] = (i % num_folds) + 1
+    grid = np.arange(num_lat_rep * num_lon_rep).reshape(num_lat_rep, num_lon_rep)
+    grid = grid.repeat(lat_chunk_size, axis=0).repeat(lon_chunk_size, axis=1)
+    blocks.values = grid
 
     blocks = blocks.where(mask, 0)
     blocks = blocks.where(mask.lon > -25, 0)
     blocks = blocks.where((mask.lat <= 16.5) | (mask.lat > 32.5), 0)
     blocks = blocks.where((mask.lat < 60) | (mask.lon > 0), 0)
+
+    idx = np.random.permutation(np.unique(blocks)[1:])
+    idx_groups = np.array_split(idx, num_folds)
+
+    for idx, idx_group in enumerate(idx_groups):
+        blocks = blocks.where(~blocks.isin(idx_group), -idx - 1)
+
+    blocks = -blocks
 
     return blocks.compute()
 

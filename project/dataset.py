@@ -859,7 +859,7 @@ class GeoDataQueue(pl.LightningDataModule):
             window_size: int = 2,
             context_size: int = 2,
             full_seq_prediction: bool = True,
-            n_mask_erode: int = 15,
+            n_mask_erode: int = 0,
             disable_shuffling: bool = False,
             cube_path: str = '/Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr',
             dummy_data: bool = False,
@@ -901,7 +901,7 @@ class GeoDataQueue(pl.LightningDataModule):
                 the forward run may be much faster.
             n_mask_erode: if > 1, training grid cells with a distance < `n_mask_erode` will be removed from
                 the mask border to reduce dependency between CV folds. Values of 0 and 1 turn off erosion,
-                default is 31.
+                default is 0.
             cube_path: the path to the data cube (zarr format).
                 Default is '/Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr'.
             dummy_data: if set to `True`, dummy data is returned and reading from disk is omitted; use for debugging.
@@ -949,7 +949,7 @@ class GeoDataQueue(pl.LightningDataModule):
         self.target_hourly = [] if target_hourly is None else [target_hourly]
 
     @staticmethod
-    def get_fold_split(fold_id: int, num_folds: int = 12) -> tuple[list[int], list[int], list[int]]:
+    def get_fold_split(fold_id: int, num_folds: int = 10) -> tuple[list[int], list[int], list[int]]:
 
         if (fold_id < 0) or (fold_id >= num_folds):
             raise ValueError(
@@ -958,29 +958,12 @@ class GeoDataQueue(pl.LightningDataModule):
 
         folds = set(range(1, num_folds + 1))
 
-        buffer = {fold_id % num_folds + 1, (fold_id + 3) % num_folds + 1}
-        val_fold = {(fold_id + 1) % num_folds + 1}
-        test_fold = {(fold_id + 2) % num_folds + 1}
-        folds = folds - val_fold - test_fold - buffer
+        val_fold = {(fold_id) % num_folds + 1}
+        test_fold = {(fold_id + 1) % num_folds + 1}
+        folds = folds - val_fold - test_fold
         folds = list(folds)
 
         return folds, list(val_fold), list(test_fold)
-
-    # @staticmethod
-    # def get_fold_split(fold_id: int) -> tuple[list[int], list[int], list[int]]:
-
-    #     if (fold_id < 0) or (fold_id > 3):
-    #         raise ValueError(
-    #             '`fold_id` out of range; must be an integer in the range [0, 3]'
-    #         )
-
-    #     folds = set(range(1, 5))
-    #     val_fold = fold_id + 1
-    #     test_fold = 4 - fold_id
-    #     folds = folds - {val_fold, test_fold}
-    #     folds = list(folds)
-
-    #     return folds, [val_fold], [test_fold]
 
     def get_dataloader(self, cvset: str):
 
