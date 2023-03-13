@@ -16,7 +16,7 @@ if __name__ == '__main__':
     exp_args.add_argument('--print_config', action='store_true')
     exp_args.add_argument('--job_name', type=str, default='default')
     exp_args.add_argument('--log_dir', type=str, default='./experiments')
-    exp_args.add_argument('--config', action='append', nargs='+')
+    #exp_args.add_argument('--config', action='append', nargs='+')
     exp_args.add_argument('--search_space', type=str, required=False)
     exp_args.add_argument('--num_trials', type=int, default=20)
 
@@ -109,61 +109,3 @@ if __name__ == '__main__':
 
     with open(slurm_cmd_script_path, mode='w') as file:
         file.write(readme)
-
-
-    # if args.predict_path is not None:
-
-    #     slurm_cmd_script_path = os.path.join(args.predict_path, 'slurm_cmd.sh')
-
-    #     if not os.path.isfile(slurm_cmd_script_path):
-    #         raise FileNotFoundError(
-    #             f'slurm command file `slurm_cmd.sh` does not exist in {args.predict_path}'
-    #         )
-
-    #     call(f'sbatch {slurm_cmd_script_path} -p', shell=True)
-
-    # elif args.search_space is not None:
-    #     with open(args.search_space, 'r') as f:
-    #         hp_data = yaml.load(f, SafeLoader)
-
-    #     hp_dict = sample_from_dict(hp_data)
-
-    #     print(hp_dict)
-
-    # else:
-
-    #     cluster = SlurmCluster(
-    #         script_name='cli_interface.py',
-    #         root_dir=os.path.join(args.log_dir, args.job_name),
-    #         job_name=args.job_name,
-    #         modules=['cuda/11.6']
-    #     )
-    #     cluster.add_args(args)
-
-    #     cluster.add_command('eval "$(conda shell.bash hook)"')
-    #     cluster.add_command('source activate dml\n')
-
-    #     cluster.add_command('export NCCL_DEBUG=ERROR')
-    #     cluster.add_command('export PYTHONFAULTHANDLER=1')
-
-    #     cluster.add_command('export LD_LIBRARY_PATH=/Net/Groups/BGI/scratch/bkraft/mamba/envs/dml/lib/:$LD_LIBRARY_PATH')
-
-    #     hparams = {
-    #     }
-
-    #     raw_command, slurm_cmd_script_path = cluster.init_run(
-    #         hparams=hparams,
-    #         config_files=args.config,
-    #         dryrun=args.check_args or args.print_config)
-
-        # if args.check_args:
-        #     # os.system(raw_command + ' --help')
-        #     call(raw_command + ' --help', shell=True)
-        # if args.print_config:
-        #     # os.system(raw_command + ' --help')
-        #     call(raw_command + ' --print_config', shell=True)
-        # else:
-        #     call(
-        #         f'sbatch --dependency=singleton {slurm_cmd_script_path} -t',
-        #         shell=True
-        #     )
