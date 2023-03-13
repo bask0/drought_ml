@@ -6,28 +6,34 @@
 
 ### Static features (geofactors)
 
-<img src='./readme_imgs/percent_tree_cover.png' width="150">
-<img src='./readme_imgs/canopyheight.png' width="150">
-<img src='./readme_imgs/rootdepth.png' width="150">
-<img src='./readme_imgs/sandfrac.png' width="150">
-<img src='./readme_imgs/topidx.png' width="150">
-<img src='./readme_imgs/wtd.png' width="150">
+<p float="left">
+    <img src='./readme_imgs/percent_tree_cover.png' width="150">
+    <img src='./readme_imgs/canopyheight.png' width="150">
+    <img src='./readme_imgs/rootdepth.png' width="150">
+    <img src='./readme_imgs/sandfrac.png' width="150">
+    <img src='./readme_imgs/topidx.png' width="150">
+    <img src='./readme_imgs/wtd.png' width="150">
+</p>
 
 ### Dynamic features (meteo, hourly)
 
 (From ERA 5 Land)
 
-<img src='./readme_imgs/rh_cf.png' width="150">
-<img src='./readme_imgs/ssrd.png' width="150">
-<img src='./readme_imgs/t2m.png' width="150">
-<img src='./readme_imgs/tp.png' width="150">
+<p float="left">
+    <img src='./readme_imgs/rh_cf.png' width="150">
+    <img src='./readme_imgs/ssrd.png' width="150">
+    <img src='./readme_imgs/t2m.png' width="150">
+    <img src='./readme_imgs/tp.png' width="150">
+</p>
 
 ### Dynamic targets (hourly, daily)
 
 (From Seviri MSG)
 
-<img src='./readme_imgs/fvc_ano.png' width="150">
-<img src='./readme_imgs/lst_ano.png' width="150">
+<p float="left">
+    <img src='./readme_imgs/fvc_ano.png' width="150">
+    <img src='./readme_imgs/lst_ano.png' width="150">
+</p>
 
 ## Objective 1
 
