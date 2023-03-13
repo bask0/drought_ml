@@ -24,7 +24,6 @@ class LightningNet(pl.LightningModule):
     """Implements basic training routine."""
     def __init__(
             self,
-            use_n_last: int = 365 + 366,
             **kwargs) -> None:
         """Standard lightning module, should be subclassed.
 
@@ -46,15 +45,11 @@ class LightningNet(pl.LightningModule):
             num_warmup_batches: the number of warmup steps. Does not apply to all
                 schedulers (cyclic and onecycle do start at low lr anyway). No warmup is done if `0`, one full
                 epoch (gradually increasing per batch) if `auto`. Defaults to `auto`.
-            use_n_last: use `use_n_last` elements of sequence to calculate the loss. Defaults to 366 * 24.
-                This asserts a minimum temporal context length even for the first target sequence element.
             kwargs:
                 Do not use kwargs, required as sink for exceeding arguments due to pytorch ligthning's agrparse scheme.
         """
 
         super().__init__()
-
-        self.use_n_last = use_n_last
 
         self.loss_nan_counter = 0
         self.acc_loss = 0.0
