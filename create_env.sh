@@ -12,10 +12,9 @@ conda activate dml
 
 pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu116
 pip install pytorch-lightning
-pip install seaborn zarr netcdf4 xarray dask scikit-gstat test-tube flake8 scikit-learn prettytable 'jsonargparse[signatures]'
+# if it breaks it is tensorflow
+pip install seaborn zarr netcdf4 xarray dask scikit-gstat test-tube flake8 tensorflow scikit-learn prettytable 'jsonargparse[signatures]'
 
 pip install -e .
-
-# netcdf4 xarray pandas zarr rasterio matplotlib cartopy cdo nco texlive-core dask jupyterlab ipywidgets numpy tqdm pytorch-lightning ffmpeg imageio scikit-learn wandb flake8 parallel tmux python-graphviz prettytable conda-build -c pytorch -c conda-forge
 
 echo ">>> Done!"
