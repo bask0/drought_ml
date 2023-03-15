@@ -2,6 +2,23 @@
 
 **This is work in progress**
 
+### Objective 1
+
+Build a temporal model of fractional vegetation cover (FVC) anomalies and land surface temperature (LST) anomelies with meteorology and geofactors as covariates.
+
+Model types:
+* LSTM
+* TCN
+* Self attention
+
+(more to come)
+
+### Objective 2
+
+Interpret the model using XAI.
+
+(more to come)
+
 ## Background
 
 ### Static features (geofactors)
@@ -34,15 +51,6 @@
     <img src='./readme_imgs/fvc_ano.png' width="200">
     <img src='./readme_imgs/lst_ano.png' width="200">
 </p>
-
-## Objective 1
-
-Build a temporal model that predicts fractional vegetation cover (FVC) anomalies and land surface temperature (LST) anomelies from meteorology and geofactors. (more to come)
-
-## Objective 2
-
-Interpret the model using XAI.
-(more to come)
 
 ## Getting started
 
