@@ -102,7 +102,6 @@ class LSTM(nn.Module):
             the model output tensor with shape (batch, seq, num_outputs).
         """
 
-
         out, h = self.lstm(x)
 
         if self.has_static:
