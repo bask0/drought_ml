@@ -95,7 +95,8 @@ class DataChunk(object):
             unfold_msc: bool = True,
             dtype: str = 'float32',
             disable_shuffling: bool = False,
-            dummy_data: bool = False) -> None:
+            dummy_data: bool = False,
+            load_data: bool = True) -> None:
 
         if dummy_data:
             data = xr.zeros_like(data)
@@ -104,7 +105,9 @@ class DataChunk(object):
 
         mask = mask.stack(sample=('lat', 'lon')).reset_coords(drop=True)
         data = data.stack(sample=('lat', 'lon')).reset_coords(drop=True)
-        self.data = data.where(mask, drop=True).load()
+
+        if load_data:
+            self.data = data.where(mask, drop=True).load()
 
         self.features_hourly = features_hourly
         self.features_static = features_static
