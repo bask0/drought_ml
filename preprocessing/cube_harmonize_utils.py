@@ -17,7 +17,7 @@ CHUNKS = {'time': 300, 'lat': 20, 'lon': 20}
 CHUNKS_MSC = {'dayofyear': 366, 'lat': 20, 'lon': 20}
 CHUNKS_HOURLY = {'time': 300, 'hour': 24, 'lat': 20, 'lon': 20}
 CHUNKS_HOURLY_MSC = {'dayofyear': 366, 'hour': 24, 'lat': 20, 'lon': 20}
-CHUNKS_ORDER = ('time', 'dayofyear', 'hour','lat', 'lon', 'layer',)
+CHUNKS_ORDER = ('time', 'dayofyear', 'hour', 'lat', 'lon', 'layer',)
 
 
 def get_data_paths(
@@ -79,7 +79,7 @@ def get_scale_and_offset(var: str) -> dict[str, float]:
     elif var.lower() == 'lst_ano':
         data_min = -100.
         data_max = 100.
-    
+
     else:
         data_min, data_max = math.inf, -math.inf
 
@@ -180,13 +180,19 @@ def create_dummy(start_year: int, end_year: int, out_path: str) -> None:
     for path in get_data_paths(scales=['hourly'], years=['2004'], months=['01']):
         ds_orig = xr.open_dataset(path)
         var = list(ds_orig.data_vars)[0]
+        var_lower = var.lower()
 
         ds = ds_orig.chunk().pipe(xr.zeros_like).isel(time=0, drop=True).expand_dims(
             time=times, hour=hours)[var].pipe(rename).transpose(*CHUNKS_ORDER, missing_dims='ignore')
-        dummy[var.lower()] = ds
+        dummy[var_lower] = ds
         variables.append(var)
 
-        if var.lower() == 'lst':
+        if var_lower in ['t2m', 'tp', 'ssrd', 'rh_cf']:
+            dummy[f'{var_lower}_msc'] = ds_orig.isel(time=0, drop=True).expand_dims(
+                dayofyear=dayofyear, hour=hours)[var].pipe(rename).transpose(*CHUNKS_ORDER, missing_dims='ignore')
+            variables.append(f'{var_lower}_msc')
+
+        if var_lower == 'lst':
             dummy['lst_msc'] = ds_orig.isel(time=0, drop=True).expand_dims(
                 dayofyear=dayofyear, hour=hours)[var].pipe(rename).transpose(*CHUNKS_ORDER, missing_dims='ignore')
             variables.append('lst_msc')
@@ -212,20 +218,16 @@ def create_dummy(start_year: int, end_year: int, out_path: str) -> None:
 
     compressor = zarr.Blosc(cname='zlib', clevel=2, shuffle=1)
 
-    encoding = {}
-
     for var in variables:
         var_lower = var.lower()
-        #scaling, data_min, data_max = get_scale_and_offset(var)
-        #dummy[var_lower].attrs['data_min'] = data_min
-        #dummy[var_lower].attrs['data_max'] = data_max
+
         if 'dayofyear' in dummy[var_lower].dims:
-            if 'hour' in  dummy[var_lower].dims:
+            if 'hour' in dummy[var_lower].dims:
                 chunking = tuple(CHUNKS_HOURLY_MSC.values())
             else:
                 chunking = tuple(CHUNKS_MSC.values())
         else:
-            if 'hour' in  dummy[var_lower].dims:
+            if 'hour' in dummy[var_lower].dims:
                 chunking = tuple(CHUNKS_HOURLY.values())
             else:
                 chunking = tuple(CHUNKS.values())
@@ -234,10 +236,6 @@ def create_dummy(start_year: int, end_year: int, out_path: str) -> None:
             'compressor': compressor,
             'chunks': chunking,
             'dtype': 'float32',
-            #'_FillValue': -32767,
-            #'dtype': 'int16',
-            #'scale_factor': scaling['scale_factor'],
-            #'add_offset': scaling['add_offset']
         }
 
     dummy.to_zarr(out_path, compute=False, encoding=encoding, mode='w')
@@ -245,7 +243,8 @@ def create_dummy(start_year: int, end_year: int, out_path: str) -> None:
     for var in variables:
         add_stats_group(path=out_path, group_name=var)
 
-def calculate_anomaly(x: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]:
+
+def calculate_anomaly(x: xr.DataArray, msc_only: bool = False) -> tuple[xr.DataArray, xr.DataArray | None]:
     gb = x.groupby('time.dayofyear')
     msc = gb.mean('time').compute()
 
@@ -254,13 +253,21 @@ def calculate_anomaly(x: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]:
     msc_stack = xr.concat((msc_0, msc, msc_1), dim='dayofyear')
     msc_smooth = msc_stack.rolling(dayofyear=17, min_periods=5, center=True).mean().sel(dayofyear=slice(1, 366))
 
-    anomalies = gb - msc_smooth
-    anomalies = anomalies.drop('dayofyear')
+    if msc_only:
+        anomalies = None
+    else:
+        anomalies = gb - msc_smooth
+        anomalies = anomalies.drop('dayofyear')
 
     return msc_smooth, anomalies
 
 
-def batch_calculate_anomaly(var: str, uid: str, out_path: str, lat_subset: slice | None = None) -> None:
+def batch_calculate_anomaly(
+        var: str,
+        uid: str,
+        out_path: str,
+        lat_subset: slice | None = None,
+        msc_only: bool = False) -> None:
 
     dummy = xr.open_zarr(out_path)
 
@@ -279,15 +286,17 @@ def batch_calculate_anomaly(var: str, uid: str, out_path: str, lat_subset: slice
     lon_chunk_bounds = np.lib.stride_tricks.sliding_window_view(
         np.concatenate((np.zeros(1, dtype=int), np.cumsum(da.chunksizes['lon']))), 2)
 
-    with tqdm(desc=f'   > Anomalies: {var.lower()}', total=len(lat_chunk_bounds) * len(lon_chunk_bounds)) as pbar:
+    with tqdm(desc=f'   > Decompose: {var.lower()}', total=len(lat_chunk_bounds) * len(lon_chunk_bounds)) as pbar:
         for lat_i, lat_chunk_bound in enumerate(lat_chunk_bounds):
             for lon_i, lon_chunk_bound in enumerate(lon_chunk_bounds):
                 lat_slice = slice(*lat_chunk_bound)
                 lon_slice = slice(*lon_chunk_bound)
 
+                array_name = f'{uid}_{lat_i}_{lon_i}'
+
                 da_sel = da.isel(lat=lat_slice, lon=lon_slice).load()
 
-                msc, ano = calculate_anomaly(da_sel)
+                msc, ano = calculate_anomaly(da_sel, msc_only=msc_only)
 
                 # Seasonality
                 msc_da = xr.Dataset()
@@ -305,35 +314,42 @@ def batch_calculate_anomaly(var: str, uid: str, out_path: str, lat_subset: slice
                         'lon': lon_slice
                     })
 
-                # Anomalies
-                ano_da = xr.Dataset()
-                ano_da[f'{var.lower()}_ano'] = ano
-
-                if 'hour' in ano_da.dims:
-                    ano_da = ano_da.drop_vars(['hour', 'time'])
-                else:
-                    ano_da = ano_da.drop_vars(['time'])
-
-                with dask.config.set(**{'array.slicing.split_large_chunks': False}):
-                    lat_slice_ = slice(lat_subset.start + lat_slice.start, lat_subset.start + lat_slice.stop)
-                    ano_da.to_zarr(out_path, consolidated=True, region={
-                        'lat': lat_slice_,
-                        'lon': lon_slice
-                    })
-
-                array_name = f'{uid}_{lat_i}_{lon_i}'
                 add_stats(path=out_path, group_name=f'{var.lower()}_msc', array_name=array_name, array=msc)
-                add_stats(path=out_path, group_name=f'{var.lower()}_ano', array_name=array_name, array=ano)
+
+                if not msc_only:
+                    # Anomalies
+                    ano_da = xr.Dataset()
+                    ano_da[f'{var.lower()}_ano'] = ano
+
+                    if 'hour' in ano_da.dims:
+                        ano_da = ano_da.drop_vars(['hour', 'time'])
+                    else:
+                        ano_da = ano_da.drop_vars(['time'])
+
+                    with dask.config.set(**{'array.slicing.split_large_chunks': False}):
+                        lat_slice_ = slice(lat_subset.start + lat_slice.start, lat_subset.start + lat_slice.stop)
+                        ano_da.to_zarr(out_path, consolidated=True, region={
+                            'lat': lat_slice_,
+                            'lon': lon_slice
+                        })
+
+                    add_stats(path=out_path, group_name=f'{var.lower()}_ano', array_name=array_name, array=ano)
 
                 pbar.update(1)
 
 
-def add_anomalies(var: str, out_path: str, dryrun: bool = False, num_proc: int = 0) -> None:
+def add_anomalies(
+        var: str,
+        out_path: str,
+        dryrun: bool = False,
+        num_proc: int = 0,
+        msc_only: bool = False) -> None:
+
     if dryrun:
         return
 
     if num_proc == 0:
-        batch_calculate_anomaly(var=var, uid='0000', out_path=out_path)
+        batch_calculate_anomaly(var=var, uid='0000', out_path=out_path, msc_only=msc_only)
         return
 
     # Split longitude into num_proc parts.
@@ -346,8 +362,7 @@ def add_anomalies(var: str, out_path: str, dryrun: bool = False, num_proc: int =
         slices.append(slice(under_limit, chunks[-1]))
         under_limit = chunks[-1]
 
-    #for slices_subset in [slices[0::2], slices[1::2]]:
-    iter_items = [(var, f'{uid:04d}', out_path, lat_slice) for uid, lat_slice in enumerate(slices)]
+    iter_items = [(var, f'{uid:04d}', out_path, lat_slice, msc_only) for uid, lat_slice in enumerate(slices)]
 
     with mpl.Pool(num_proc) as pool:
         pool.starmap(batch_calculate_anomaly, iter_items)
@@ -413,7 +428,6 @@ def write_data(in_path: str, out_path: str, dryrun: bool = False) -> None:
         if 'wtd' in data.data_vars:
             data.wtd.attrs.pop('standard_name')
         elif 'sandfrac' in data.data_vars:
-            #data = data.sel(layer=[1, 2, 3, 4, 5, 6]).mean('layer').compute()
             layer_content = \
                 (data.isel(layer=0) + data.isel(layer=1)) / 2 * 5 + \
                 (data.isel(layer=1) + data.isel(layer=2)) / 2 * 10 + \
@@ -513,6 +527,8 @@ def merge_stats(out_path: str) -> None:
     for key, values in z.groups():
         if '_stats' in key:
             var_key = key.removesuffix('_stats')
+            if key != 'rh_cf_msc_stats':
+                continue
             if var_key not in z.array_keys():
                 raise KeyError(
                     f'no corresponding variable `{var_key}` found for stats `{key}`.'
