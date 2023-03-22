@@ -1,5 +1,6 @@
 
 import xarray as xr
+from typing import overload
 
 
 def get_slice_from_anchor(
@@ -43,3 +44,101 @@ def sel_to_poly_corners(sel: dict[slice]) -> list[list[int]]:
         [sel['lon'].start, sel['lat'].stop],
     ]
     return corners
+
+
+@overload
+def stacktime(ds: xr.Dataset) -> xr.Dataset:
+    ...
+
+
+@overload
+def stacktime(ds: xr.DataArray) -> xr.DataArray:
+    ...
+
+
+def stacktime(ds: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
+    """Stack time (day) x hour into single time dimension.
+
+    Args:
+        ds: data to reformat with temporal dimensions 'time' and 'hour'.
+
+    Returns:
+        ds with same type as input (xr.Dataset or xr.DataArray) with new dimension 'time'
+            and dropped dimension 'hour'.
+
+    """
+    for required_dim in ['time', 'hour']:
+        if required_dim not in ds.dims:
+            raise KeyError(f'required dimension \'{required_dim}\' not found in `ds` with dimensions {ds.dims}.')
+
+    dsstacked = ds.stack(t=('time', 'hour'))
+    dsstacked['timvals'] = dsstacked.time + dsstacked.hour.astype('timedelta64[h]')
+
+    return dsstacked.set_index(t='timvals').rename(time='old_time').rename(t='time').drop_vars('old_time')
+
+
+@overload
+def msc2date(ds: xr.Dataset) -> xr.Dataset:
+    ...
+
+
+@overload
+def msc2date(ds: xr.DataArray) -> xr.DataArray:
+    ...
+
+
+def msc2date(ds):
+    """Change seasonal data with dayofyear x hour into single time coordinate (with year 2000 as base).
+
+    Args:
+        ds: data to reformat with temporal dimension 'dayofyear'.
+
+    Returns:
+        ds with same type as input (xr.Dataset or xr.DataArray) with new dimension 'time' and
+            dropped dimension 'dayofyear' (and 'hour' if present in `ds`).
+
+    # TODO: Handle data without hour dimension.
+
+    """
+    if 'dayofyear' not in ds.dims:
+        raise KeyError(f'required dimension \'dayofyear\' not found in `ds` with dimensions {ds.dims}.')
+
+    if 'hour' in ds.dims:
+        dsstacked = ds.stack(time=('dayofyear', 'hour')).drop('hour')
+        return dsstacked.assign_coords(
+            time=pd.date_range('2000-01-01', '2001-01-01', freq='H', inclusive='left'))
+    else:
+        return ds.assign_coords(
+            dayofyear=pd.date_range('2000-01-01', '2001-01-01', freq='D', inclusive='left')).rename({'dayofyear': 'time'})
+
+
+@overload
+def msc_align(msc: xr.Dataset, ref: xr.Dataset | xr.DataArray) -> xr.Dataset:
+    ...
+
+
+@overload
+def msc_align(msc: xr.DataArray, ref: xr.Dataset | xr.DataArray) -> xr.DataArray:
+    ...
+
+
+def msc_align(msc: xr.Dataset | xr.DataArray, ref: xr.Dataset | xr.DataArray):
+    """Align seasonality with dayofyear with reference data time dimension.
+
+    Args:
+        msc: seasonality data to reformat with temporal dimension 'dayofyear', and optionally 'hour'.
+        ref: reference data with temporal dimension `time`.
+
+    Returns:
+        ds with same type as msc input (xr.Dataset or xr.DataArray)
+
+    """
+    if 'dayofyear' not in msc.dims:
+        raise KeyError(f'required dimension \'dayofyear\' not found in `msc` with dimensions {msc.dims}.')
+
+    for required_var in ['time', 'hour']:
+        if required_var not in ref.dims:
+            raise KeyError(f'required dimension \'{required_var}\' not found in `msc` with dimensions {ref.dims}.')
+
+    msc_aligned = msc.sel(dayofyear=ref.time.dt.dayofyear - 1)
+    return msc_aligned.chunk({'time': 1000})
