@@ -1,6 +1,7 @@
 
-import logging 
+import logging
 from typing import Any
+import numpy as np
 
 
 class LoggerAction(object):
@@ -41,7 +42,7 @@ class Sampler(object):
 
 
 class SearchSpace:
-    def __init__(self, search_space: dict, seed: Optional[int] = None, max_iter: int = -1):
+    def __init__(self, search_space: dict, seed: int | None = None, max_iter: int = -1):
         self.search_space = search_space
         self.seed = seed
         self.rs = np.random.RandomState(seed=seed)
@@ -118,5 +119,5 @@ class SearchSpace:
             for k, v in self.search_space.items():
                 s += f'\n    - {k}: {v}'
         else:
-            s += f'\n    - empty'
+            s += '\n    - empty'
         return s
