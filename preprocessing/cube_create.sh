@@ -38,20 +38,38 @@ echo ">>> Computing mask..."
 python preprocessing/compute_mask.py \
   -p /Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr
 
-echo ">>> Computing anomalies..."
+echo ">>> Computing feature seasonalities..."
+
+python preprocessing/cube_harmonize.py \
+      -o /Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr \
+      --seasonality t2m
+
+python preprocessing/cube_harmonize.py \
+      -o /Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr \
+      --seasonality tp
+
+python preprocessing/cube_harmonize.py \
+      -o /Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr \
+      --seasonality ssrd
+
+python preprocessing/cube_harmonize.py \
+      -o /Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr \
+      --seasonality rh_cf
+
+echo ">>> Computing target anomalies..."
+
+python preprocessing/cube_harmonize.py \
+      -o /Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr \
+      --anomalies lst
 
 python preprocessing/cube_harmonize.py \
       -o /Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr \
       --anomalies fvc
 
-python preprocessing/cube_harmonize.py \
-      -o /Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr \
-      --anomalies lst
-
 echo ">>> Merging stats..."
 
 python preprocessing/cube_harmonize.py \
       -o /Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr \
-      --anomalies lst
+      --merge_stats
 
 echo ">>> Done"
