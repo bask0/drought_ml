@@ -13,7 +13,7 @@ conda activate dml
 pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu116
 pip install pytorch-lightning
 # if it breaks it is tensorflow
-pip install seaborn zarr netcdf4 xarray dask scikit-gstat test-tube flake8 tensorflow scikit-learn prettytable 'jsonargparse[signatures]'
+pip install seaborn zarr netcdf4 xarray dask scikit-gstat test-tube flake8 tensorflow captum scikit-learn prettytable 'jsonargparse[signatures]'
 
 pip install -e .
 
