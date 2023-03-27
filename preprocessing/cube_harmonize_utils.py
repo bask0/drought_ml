@@ -4,14 +4,9 @@ import dask
 import pandas as pd
 import numpy as np
 import zarr
-import netCDF4 as nc
 from glob import glob
 import warnings
-import math
 from typing import Union
-from tqdm import tqdm
-import multiprocessing as mpl
-import os
 
 CHUNKS = {'time': 300, 'lat': 20, 'lon': 20}
 CHUNKS_MSC = {'dayofyear': 366, 'lat': 20, 'lon': 20}
@@ -55,70 +50,6 @@ def get_data_paths(
     return paths
 
 
-def get_scale_and_offset(var: str) -> dict[str, float]:
-    """Calculate packing values from -30000 to 30000. The int16 range
-    is not entirely used to avoid out-of-range conflices when appending data
-    with potentially lower or larger values.
-
-    Warning: as some min/max attributes are missing after preprocessing (bug?),
-    some missings are tolerated. We There is a buffer for potential outliers
-    in the min/max values in files not considered. Maximum 10% of the files
-    are allowed to have missing attributes, else, an error is raised.
-    """
-
-    if var.lower() == 'fvc_msc':
-        var = 'fvc'
-
-    if var.lower() == 'lst_msc':
-        var = 'lst'
-
-    if var.lower() == 'fvc_ano':
-        data_min = -1.
-        data_max = 1.
-
-    elif var.lower() == 'lst_ano':
-        data_min = -100.
-        data_max = 100.
-
-    else:
-        data_min, data_max = math.inf, -math.inf
-
-        paths = get_data_paths(variables=[var])
-
-        num_vars = len(paths)
-        num_attrs_missing = 0
-
-        for path in paths:
-
-            ds = nc.Dataset(path, 'r', format='NETCDF4')
-            try:
-                min_val = ds.getncattr('min_val')
-                max_val = ds.getncattr('max_val')
-            except Exception as e:
-                num_attrs_missing += 1
-                perc_missing = num_attrs_missing / num_vars * 100
-                warnings.warn(
-                    f'Dataset has no attribute `min_val` or `max_val`: {path}\n'
-                    f'({perc_missing:0.1f}% of maximum 10%)'
-                )
-                if perc_missing > 10:
-                    raise AssertionError(
-                        f'More than 10% of the files ({num_vars} in total) do not have attributes '
-                        '`min_val` or `max_val`.'
-                    )
-            data_min = min(min_val, data_min)
-            data_max = max(max_val, data_max)
-
-            ds.close()
-
-    # stretch/compress data to the available packed range
-    scale_factor = (data_max - data_min) / 60000
-    # translate the range to be symmetric about zero
-    add_offset = data_min + 30000 * scale_factor
-
-    return {'scale_factor': scale_factor, 'add_offset': add_offset}, data_min, data_max
-
-
 def rename(x: Union[xr.Dataset, xr.DataArray]) -> Union[xr.Dataset, xr.DataArray]:
     return x.rename({'latitude': 'lat', 'longitude': 'lon'})
 
@@ -131,29 +62,6 @@ def rename_to_lower(x: Union[xr.Dataset, xr.DataArray]) -> Union[xr.Dataset, xr.
         x.name = x.name.lower()
 
     return x
-
-
-def add_stats_group(path: str, group_name: str):
-    z = zarr.open(path)
-    z.create_group(group_name.lower() + '_stats')
-
-
-def add_stats(path: str, group_name: str, array_name: str, array: xr.DataArray):
-    z = zarr.open(path)
-    g = z[group_name.lower() + '_stats']
-
-    if isinstance(array, xr.Dataset):
-        g[array_name] = [
-            array.notnull().sum().compute().to_array().item(),
-            array.sum().compute().to_array().item(),
-            (array ** 2).sum().compute().to_array().item(),
-        ]
-    else:
-        g[array_name] = [
-            array.notnull().sum().compute().item(),
-            array.sum().compute().item(),
-            (array ** 2).sum().compute().item(),
-        ]
 
 
 def hourly2dayhour(x: Union[xr.Dataset, xr.DataArray]) -> Union[xr.Dataset, xr.DataArray]:
@@ -239,133 +147,6 @@ def create_dummy(start_year: int, end_year: int, out_path: str) -> None:
         }
 
     dummy.to_zarr(out_path, compute=False, encoding=encoding, mode='w')
-
-    for var in variables:
-        add_stats_group(path=out_path, group_name=var)
-
-
-def calculate_anomaly(x: xr.DataArray, msc_only: bool = False) -> tuple[xr.DataArray, xr.DataArray | None]:
-    gb = x.groupby('time.dayofyear')
-    msc = gb.mean('time').compute()
-
-    msc_0 = msc.copy().assign_coords(dayofyear=np.arange(1 - 366, 1))
-    msc_1 = msc.copy().assign_coords(dayofyear=np.arange(367, 367 + 366))
-    msc_stack = xr.concat((msc_0, msc, msc_1), dim='dayofyear')
-    msc_smooth = msc_stack.rolling(dayofyear=17, min_periods=5, center=True).mean().sel(dayofyear=slice(1, 366))
-
-    if msc_only:
-        anomalies = None
-    else:
-        anomalies = gb - msc_smooth
-        anomalies = anomalies.drop('dayofyear')
-
-    return msc_smooth, anomalies
-
-
-def batch_calculate_anomaly(
-        var: str,
-        uid: str,
-        out_path: str,
-        lat_subset: slice | None = None,
-        msc_only: bool = False) -> None:
-
-    dummy = xr.open_zarr(out_path)
-
-    if lat_subset is not None:
-        dummy = dummy.isel(lat=lat_subset)
-
-    da = dummy[var.lower()]
-
-    if 'mask' not in dummy.data_vars:
-        raise KeyError(
-            f'provided cube at \'{out_path}\' has no data variable \'mask\'.'
-        )
-
-    lat_chunk_bounds = np.lib.stride_tricks.sliding_window_view(
-        np.concatenate((np.zeros(1, dtype=int), np.cumsum(da.chunksizes['lat']))), 2)
-    lon_chunk_bounds = np.lib.stride_tricks.sliding_window_view(
-        np.concatenate((np.zeros(1, dtype=int), np.cumsum(da.chunksizes['lon']))), 2)
-
-    with tqdm(desc=f'   > Decompose: {var.lower()}', total=len(lat_chunk_bounds) * len(lon_chunk_bounds)) as pbar:
-        for lat_i, lat_chunk_bound in enumerate(lat_chunk_bounds):
-            for lon_i, lon_chunk_bound in enumerate(lon_chunk_bounds):
-                lat_slice = slice(*lat_chunk_bound)
-                lon_slice = slice(*lon_chunk_bound)
-
-                array_name = f'{uid}_{lat_i}_{lon_i}'
-
-                da_sel = da.isel(lat=lat_slice, lon=lon_slice).load()
-
-                msc, ano = calculate_anomaly(da_sel, msc_only=msc_only)
-
-                # Seasonality
-                msc_da = xr.Dataset()
-                msc_da[f'{var.lower()}_msc'] = msc
-
-                if 'hour' in msc_da.dims:
-                    msc_da = msc_da.drop_vars(['hour', 'dayofyear'])
-                else:
-                    msc_da = msc_da.drop_vars(['dayofyear'])
-
-                with dask.config.set(**{'array.slicing.split_large_chunks': False}):
-                    lat_slice_ = slice(lat_subset.start + lat_slice.start, lat_subset.start + lat_slice.stop)
-                    msc_da.to_zarr(out_path, consolidated=True, region={
-                        'lat': lat_slice_,
-                        'lon': lon_slice
-                    })
-
-                add_stats(path=out_path, group_name=f'{var.lower()}_msc', array_name=array_name, array=msc)
-
-                if not msc_only:
-                    # Anomalies
-                    ano_da = xr.Dataset()
-                    ano_da[f'{var.lower()}_ano'] = ano
-
-                    if 'hour' in ano_da.dims:
-                        ano_da = ano_da.drop_vars(['hour', 'time'])
-                    else:
-                        ano_da = ano_da.drop_vars(['time'])
-
-                    with dask.config.set(**{'array.slicing.split_large_chunks': False}):
-                        lat_slice_ = slice(lat_subset.start + lat_slice.start, lat_subset.start + lat_slice.stop)
-                        ano_da.to_zarr(out_path, consolidated=True, region={
-                            'lat': lat_slice_,
-                            'lon': lon_slice
-                        })
-
-                    add_stats(path=out_path, group_name=f'{var.lower()}_ano', array_name=array_name, array=ano)
-
-                pbar.update(1)
-
-
-def add_anomalies(
-        var: str,
-        out_path: str,
-        dryrun: bool = False,
-        num_proc: int = 0,
-        msc_only: bool = False) -> None:
-
-    if dryrun:
-        return
-
-    if num_proc == 0:
-        batch_calculate_anomaly(var=var, uid='0000', out_path=out_path, msc_only=msc_only)
-        return
-
-    # Split longitude into num_proc parts.
-    dummy = xr.open_zarr(out_path)
-    lat_chunks = np.concatenate((np.zeros(1, dtype=int), np.cumsum(dummy.chunksizes['lat'])))
-
-    slices = []
-    under_limit = 0
-    for chunks in np.array_split(lat_chunks, num_proc):
-        slices.append(slice(under_limit, chunks[-1]))
-        under_limit = chunks[-1]
-
-    iter_items = [(var, f'{uid:04d}', out_path, lat_slice, msc_only) for uid, lat_slice in enumerate(slices)]
-
-    with mpl.Pool(num_proc) as pool:
-        pool.starmap(batch_calculate_anomaly, iter_items)
 
 
 def write_data(in_path: str, out_path: str, dryrun: bool = False) -> None:
@@ -512,48 +293,8 @@ def write_data(in_path: str, out_path: str, dryrun: bool = False) -> None:
         if 't2m' in data.data_vars:
             data['t2m'] = data['t2m'] - 273.15
 
-        # Compute mean.
-        for var in data.data_vars:
-            array_name = os.path.basename(data.encoding['source']).removesuffix('.nc')
-            add_stats(path=out_path, group_name=var, array_name=array_name, array=data)
+        if 'tp' in data.data_vars:
+            data['tp'] = data['tp'] * 1000
 
         with dask.config.set(**{'array.slicing.split_large_chunks': False}):
             data.to_zarr(out_path, consolidated=True, region={'time': time_slice})
-
-
-def merge_stats(out_path: str) -> None:
-    z = zarr.open(out_path)
-
-    for key, values in z.groups():
-        if '_stats' in key:
-            var_key = key.removesuffix('_stats')
-            if key != 'rh_cf_msc_stats':
-                continue
-            if var_key not in z.array_keys():
-                raise KeyError(
-                    f'no corresponding variable `{var_key}` found for stats `{key}`.'
-                )
-
-            n = 0.
-            s = 0.
-            s2 = 0.
-            if len(list(values.arrays())):
-                for arr_key, arr in values.arrays():
-                    n += arr[0]
-                    s += arr[1]
-                    s2 += arr[2]
-
-                mn = s / n
-                sd = ((s2 / n) - (s / n) ** 2) ** 0.5
-
-                z[var_key].attrs['mean'] = mn
-                z[var_key].attrs['std'] = sd
-
-                z.store.rmdir(key)
-
-            else:
-                raise RuntimeError(
-                    f'no stats found in `{key}`.'
-                )
-
-    zarr.consolidate_metadata(out_path)

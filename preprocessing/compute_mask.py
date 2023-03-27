@@ -121,6 +121,8 @@ def get_fold_mask(
 
 def compute_mask(path):
 
+    print('Computing mask...')
+
     ds = xr.open_zarr(path)
 
     mask_static = (
@@ -167,7 +169,11 @@ def compute_mask(path):
             'chunks': (lat_chunk, lon_chunk,),
         }
 
+    print('Writing mask...')
+
     mask.to_zarr(path, mode='a', consolidated=True)
+
+    print('Done...')
 
 
 if __name__ == '__main__':
