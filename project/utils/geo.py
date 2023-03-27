@@ -1,5 +1,6 @@
 
 import xarray as xr
+import pandas as pd
 from typing import overload
 
 
@@ -109,7 +110,8 @@ def msc2date(ds):
             time=pd.date_range('2000-01-01', '2001-01-01', freq='H', inclusive='left'))
     else:
         return ds.assign_coords(
-            dayofyear=pd.date_range('2000-01-01', '2001-01-01', freq='D', inclusive='left')).rename({'dayofyear': 'time'})
+            dayofyear=pd.date_range(
+                '2000-01-01', '2001-01-01', freq='D', inclusive='left')).rename({'dayofyear': 'time'})
 
 
 @overload
