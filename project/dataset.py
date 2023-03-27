@@ -16,6 +16,7 @@ import warnings
 from typing import Any, Iterable
 from numpy.typing import ArrayLike
 
+from project.utils.geo import msc_align
 from project.utils.types import DateLookup, Coords, BatchPattern, QueueException
 
 # Ignore anticipated PL warnings.
@@ -90,13 +91,14 @@ class DataChunk(object):
             target_daily: list[str] = [],
             context_size: int = 2,
             window_size: int = -1,
-            chunk_index: int = 2,
+            chunk_index: int = 0,
             data_scaling: dict[str, dict[str, float]] = None,
             unfold_msc: bool = True,
             dtype: str = 'float32',
             disable_shuffling: bool = False,
             dummy_data: bool = False,
-            load_data: bool = True) -> None:
+            load_data: bool = True,
+            return_baseline: bool = False) -> None:
 
         if dummy_data:
             data = xr.zeros_like(data)
@@ -108,8 +110,11 @@ class DataChunk(object):
 
         if load_data:
             self.data = data.where(mask, drop=True).load()
+        else:
+            self.data = data.where(mask, drop=True)
 
         self.features_hourly = features_hourly
+        self.features_hourly_msc = [f + '_msc' for f in features_hourly]
         self.features_static = features_static
         self.target_hourly = target_hourly
         self.target_daily = target_daily
@@ -118,11 +123,14 @@ class DataChunk(object):
         self.window_size = window_size
         self.chunk_index = chunk_index
 
+        if data_scaling is None:
+            raise ValueError('Data scaling must be provied.')
         self.data_scaling = data_scaling
         self.unfold_msc = unfold_msc
         self.dtype = dtype
         self.disable_shuffling = disable_shuffling
         self.dummy_data = dummy_data
+        self.return_baseline = return_baseline
 
         self.coords = self._get_coords()
 
@@ -141,8 +149,30 @@ class DataChunk(object):
             for var in self.target_daily + self.target_hourly:
                 data_sel[var + '_msc'] = data_sel[var + '_msc'].sel(dayofyear=dayofyear)
 
-        f_hourly = self.xr2numpy(data_sel[self.features_hourly], scale=True)
-        f_static = self.xr2numpy(data_sel[self.features_static], scale=True)
+        data_sel_hourly = data_sel[self.features_hourly]
+        data_sel_stat = data_sel[self.features_static]
+        f_hourly = self.xr2numpy(data_sel_hourly, scale=True)
+        f_static = self.xr2numpy(data_sel_stat, scale=True)
+
+        if self.return_baseline:
+            data_sel_hourly_msc = data_sel[self.features_hourly_msc]
+            data_sel_hourly_baseline = xr.Dataset()
+            for var in data_sel_hourly_msc.data_vars:
+                var_nosuffix = var.removesuffix('_msc')
+                if var_nosuffix == 'tp':
+                    data_sel_hourly_baseline[var_nosuffix] = xr.full_like(data_sel_hourly[var_nosuffix], 0.0)
+                else:
+                    data_sel_hourly_baseline[var_nosuffix] = msc_align(data_sel_hourly_msc[var], data_sel_hourly)
+
+            data_sel_stat_baseline = xr.Dataset()
+            for var in data_sel_stat.data_vars:
+                data_sel_stat_baseline[var] = xr.full_like(data_sel_stat[var], self.data[var].attrs['mean'])
+
+            f_hourly_bl = self.xr2numpy(data_sel_hourly_baseline, scale=True)
+            f_static_bl = self.xr2numpy(data_sel_stat_baseline, scale=True)
+        else:
+            f_hourly_bl = None
+            f_static_bl = None
 
         if len(self.target_hourly) > 0:
             target_hourly = self.target_hourly[0]
@@ -177,6 +207,8 @@ class DataChunk(object):
         return BatchPattern(
             f_hourly=f_hourly,
             f_static=f_static,
+            f_hourly_bl=f_hourly_bl,
+            f_static_bl=f_static_bl,
             t_hourly_ts=t_hourly_ts,
             t_hourly_msc=t_hourly_msc,
             t_hourly_ano=t_hourly_ano,
@@ -194,7 +226,7 @@ class DataChunk(object):
 
         return result
 
-    def xr2numpy(self, x: xr.Dataset, scale: bool) -> np.ndarray | None:
+    def xr2numpy(self, x: xr.Dataset, scale: bool, is_baseline: bool = False) -> np.ndarray | None:
 
         if len(x) == 0:
             return None
@@ -689,7 +721,7 @@ class DataQueue(IterableDataset):
             for incomplete_batch in subsize_batches:
                 for i in range(len(incomplete_batch.coords.lat)):
                     batch_item = BatchPattern(
-                        *[el if el is None else el[i] for el in incomplete_batch[:8]],
+                        *[el if el is None else el[i] for el in incomplete_batch[:10]],
                         coords=Coords(
                             lat=incomplete_batch.coords.lat[i],
                             lon=incomplete_batch.coords.lon[i],
@@ -713,6 +745,8 @@ class DataQueue(IterableDataset):
         return BatchPattern(
             f_hourly=torch.randn(self.batch_size, 730, 24, len(self.features_hourly)) if self.features_hourly else None,
             f_static=torch.randn(self.batch_size, len(self.features_static)) if self.features_static else None,
+            f_hourly_bl=torch.randn(self.batch_size, 730, 24, len(self.features_hourly)) if self.features_hourly else None,
+            f_static_bl=torch.randn(self.batch_size, len(self.features_static)) if self.features_static else None,
             t_daily=torch.randn(self.batch_size, 730, len(self.target_daily)) if self.target_daily else None,
             t_hourly=torch.randn(self.batch_size, 730, 24, len(self.target_hourly)) if self.target_hourly else None,
             coords=Coords(
@@ -819,16 +853,46 @@ class GeoDataQueue(pl.LightningDataModule):
     Data shape
     ----------
     The dataloaders return data in the format:
-    > BatchPattern = namedtuple('BatchPattern', 'f_hourly f_static t_hourly, t_daily coords'),
+    > BatchPattern = namedtuple(
+        f_hourly: Tensor
+        f_static: Tensor
+        f_hourly_bl: Tensor | None
+        f_static_bl: Tensor | None
+        t_hourly_ts: Tensor
+        t_hourly_msc: Tensor
+        t_hourly_ano: Tensor
+        t_daily_ts: Tensor
+        t_daily_msc: Tensor
+        t_daily_ano: Tensor
+        coords: Coords
+    )
     The `coords` are formatted as:
-    > Coords = namedtuple('Coords', 'lat, lon, chunk, dayofyear')
+    > Coords = namedtuple(
+        lat: int
+        lon: int
+        chunk: int
+        window_start: str
+        window_end: str
+        num_days: int
+        dayofyear: list[int]
+    )
 
     `f_hourly` are hourly features. They have shape [B, H, D, FH]
     `f_static` are static features. They have shape [B, FS]
-    `t_hourly` is hourly target. They have shape [B, H, D, TH]
-    `f_daily` is daily target. They have shape [B, D, TD]
+    `f_hourly_bl` are hourly feature baselines. Same shape as `f_hourly`
+    `f_static_bl` are static feature baselines. Same shape as `f_static`
+    `t_hourly_ts` is hourly target. They have shape [B, H, D, TH]
+    `t_hourly_msc` same as `t_hourly_ts` but seasonality
+    `t_hourly_ano` same as `t_hourly_ts` but anomalies
+    `t_daily` is daily target. They have shape [B, D, TD]
+    `t_daily_msc` same as `t_daily` but seasonality
+    `t_daily_ano` same as `t_daily` but anomalies
     `lat`, `lon` are latitudes and longitudes of each samples, they both have shape [B]
     `chunk` is the chunk id of each samples with shape [B]
+    `window_start` is the time stamp of the start date
+    `window_end` is the time stamp of the end date
+    `num_days` is the number of days the model predicts (not including additional temp. context)
+    `dayofyear` day of year for the date (D) dimension
 
     * batch_size: B
     * num_hours: H (=24)
@@ -1068,7 +1132,7 @@ class GeoDataQueue(pl.LightningDataModule):
 
         r = n // 2
 
-        y, x = np.ogrid[-r:n-r, -r:n-r]
+        y, x = np.ogrid[-r:n - r, -r:n - r]
         mask = x * x + y * y <= r * r
 
         kernel = np.zeros((n, n), dtype=bool)
@@ -1078,13 +1142,6 @@ class GeoDataQueue(pl.LightningDataModule):
         mask_.values[:] = binary_dilation(ref_mask.values, structure=kernel)
         eroded_mask = ~mask_ & erode_mask
         return eroded_mask
-
-    # @staticmethod
-    # def erode_mask(ref_mask, erode_mask, n):
-    #     mask_ = ref_mask.copy()
-    #     mask_.values[:] = binary_dilation(ref_mask.values, structure=np.ones((n, n), dtype='bool'))
-    #     eroded_mask = ~mask_ & erode_mask
-    #     return eroded_mask
 
     @property
     def num_features_hourly(self) -> int:
