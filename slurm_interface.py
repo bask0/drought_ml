@@ -16,9 +16,8 @@ if __name__ == '__main__':
     exp_args.add_argument('--print_config', action='store_true')
     exp_args.add_argument('--job_name', type=str, default='default')
     exp_args.add_argument('--log_dir', type=str, default='./experiments')
-    #exp_args.add_argument('--config', action='append', nargs='+')
     exp_args.add_argument('--search_space', type=str, required=False)
-    exp_args.add_argument('--num_trials', type=int, default=20)
+    exp_args.add_argument('--num_trials', type=int, default=24)
 
     cluster_args = parser.add_argument_group('cluster')
     cluster_args.add_argument('--per_experiment_nb_nodes', type=int, default=1)
