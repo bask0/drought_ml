@@ -10,7 +10,7 @@ class DateLookup(NamedTuple):
     start_context_date: str
     start_window_date: str
     end_window_date: str
-    num_window_days : int
+    num_window_days: int
     time_slice: slice
 
 
@@ -36,6 +36,8 @@ class VarStackPattern(NamedTuple):
 class BatchPattern(NamedTuple):
     f_hourly: Tensor
     f_static: Tensor
+    f_hourly_bl: Tensor | None
+    f_static_bl: Tensor | None
     t_hourly_ts: Tensor
     t_hourly_msc: Tensor
     t_hourly_ano: Tensor
