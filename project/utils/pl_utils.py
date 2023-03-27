@@ -25,7 +25,7 @@ class OutputWriter(BasePredictionWriter):
 
         Example:
         >>> pred_writer = OutputWriter()
-        >>> trainer = Trainer(callbacks=[pred_writer])
+        >>> trainer = pl.Trainer(callbacks=[pred_writer])
         >>> model = MyModel()
         >>> trainer.predict(model, return_predictions=False)
 
@@ -85,7 +85,10 @@ class OutputWriter(BasePredictionWriter):
             for key, var in self.var_map.items():
                 el = getattr(i_pred, key)[-i_pred.coords.num_days:, ..., 0]
                 el = DataChunk.normalize_var(
-                    x=el, stats=self.data_scaling[var.removesuffix('_hat').removesuffix('_var')], invert=True, is_uncertainty='_var' in var
+                    x=el,
+                    stats=self.data_scaling[var.removesuffix('_hat').removesuffix('_var')],
+                    invert=True,
+                    is_uncertainty='_var' in var
                 )
 
                 self.chunks[chunk_id]['ds'][
@@ -94,28 +97,6 @@ class OutputWriter(BasePredictionWriter):
                     'lat': i_pred.coords.lat,
                     'lon': i_pred.coords.lon,
                     'time': slice(i_pred.coords.window_start, i_pred.coords.window_end)}] = el
-
-            # for target_i, target in enumerate(self.targets):
-            #     pred_mean = i_pred.mean_hat[-i_pred.coords.num_days:, ..., target_i]
-            #     pred_mean = DataChunk.normalize_var(x=pred_mean, stats=self.data_scaling[target], invert=True)
-
-            #     self.chunks[chunk_id]['ds'][
-            #         self.get_target_pred_name(name=target, is_variance=False)
-            #     ].loc[{
-            #         'lat': i_pred.coords.lat,
-            #         'lon': i_pred.coords.lon,
-            #         'time': slice(i_pred.coords.window_start, i_pred.coords.window_end)}] = pred_mean
-
-            #     if self.has_variance:
-            #         pred_var = i_pred.var_hat[-i_pred.coords.num_days:, ..., target_i]
-            #         pred_var = DataChunk.normalize_var(x=pred_var, stats=self.data_scaling[target], invert=True, is_uncertainty=True)
-
-            #         self.chunks[chunk_id]['ds'][
-            #             self.get_target_pred_name(name=target, is_variance=True)
-            #         ].loc[{
-            #             'lat': i_pred.coords.lat,
-            #             'lon': i_pred.coords.lon,
-            #             'time': i_pred.coords.time_slice}] = pred_var
 
             self.chunks[chunk_id]['num_saved'] += 1
 
@@ -230,16 +211,6 @@ class OutputWriter(BasePredictionWriter):
 
         return xr.full_like(dummy, fill_value=np.nan)
 
-    # def get_target_like(self, data: xr.Dataset, has_variance: bool, use_orig_name: bool) -> xr.Dataset:
-    #     dummy = xr.Dataset()
-    #     for target in self.targets:
-    #         name = target if use_orig_name else self.get_target_pred_name(name=target, is_variance=False)
-    #         dummy[self.get_target_pred_name(name=target, is_variance=False)] = data[name]
-    #         if has_variance:
-    #             dummy[self.get_target_pred_name(name=target, is_variance=True)] = data[name]
-
-    #     return xr.full_like(dummy, fill_value=np.nan)
-
     @staticmethod
     def get_target_pred_name(name: str, is_variance: bool) -> bool:
         if is_variance:
@@ -250,9 +221,9 @@ class OutputWriter(BasePredictionWriter):
     @staticmethod
     def isnamedtuple(obj) -> bool:
         return (
-                isinstance(obj, tuple) and
-                hasattr(obj, '_asdict') and
-                hasattr(obj, '_fields')
+            isinstance(obj, tuple) and
+            hasattr(obj, '_asdict') and
+            hasattr(obj, '_fields')
         )
 
     def subset_namedtuple(self, x: Any, ind: int) -> namedtuple:
