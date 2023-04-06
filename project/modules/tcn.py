@@ -75,10 +75,13 @@ class Residual(nn.Module):
         if s_res is None:
             return x + self.downsample(res)
         else:
-            res = torch.cat((
-                res,
-                s_res.unsqueeze(-1).expand(s_res.shape[0], s_res.shape[1], res.shape[-1]
-            )), dim=-2)
+            res = torch.cat(
+                (
+                    res,
+                    s_res.unsqueeze(-1).expand(s_res.shape[0], s_res.shape[1], res.shape[-1])
+                ),
+                dim=-2
+            )
 
             return x + self.downsample(res)
 
@@ -135,7 +138,7 @@ class TemporalBlock(nn.Module):
         self.conv2.weight.data.normal_(0, 0.01)
         self.res.init_weights()
 
-    def forward(self, x: Tensor, s = Tensor | None) -> Tensor:
+    def forward(self, x: Tensor, s: Tensor | None) -> Tensor:
         """Model forward run.
 
         Shapes:
@@ -209,14 +212,15 @@ class TemporalConvNet(nn.Module):
             dilation_size = 2 ** i
             in_channels = num_inputs if i == 0 else num_hidden
             layer = TemporalBlock(
-                    n_inputs=in_channels,
-                    n_static_inputs=num_static_inputs,
-                    n_outputs=num_hidden,
-                    kernel_size=kernel_size,
-                    stride=1,
-                    dilation=dilation_size,
-                    padding=(kernel_size - 1) * dilation_size,
-                    dropout=dropout)
+                n_inputs=in_channels,
+                n_static_inputs=0,
+                n_outputs=num_hidden,
+                kernel_size=kernel_size,
+                stride=1,
+                dilation=dilation_size,
+                padding=(kernel_size - 1) * dilation_size,
+                dropout=dropout
+            )
 
             self.tcn_layers.update({f'layer_h{i:02d}': layer})
 
@@ -229,7 +233,7 @@ class TemporalConvNet(nn.Module):
                 kernel_size=1
             )
 
-    def forward(self, x: Tensor, s: Tensor | None = None) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         """Run data through the model.
 
         Args:
@@ -242,7 +246,7 @@ class TemporalConvNet(nn.Module):
 
         out = x
         for _, layer in self.tcn_layers.items():
-            out = layer(out, s)
+            out = layer(out, None)
 
         out = self.linear(out)
         return out
