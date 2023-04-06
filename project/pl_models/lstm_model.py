@@ -82,8 +82,8 @@ class LSTMPL(LightningNet):
             outpout_channel_last=True
         )
 
-        num_out = 1 * (int(predict_var) + 1) * (int(predict_msc) + 1)
-        num_hidden_lstm = num_hidden * num_out
+        self.num_out = (int(predict_var) + 1) * (int(predict_msc) + 1)
+        num_hidden_lstm = num_hidden * self.num_out
 
         self.lstm = LSTM(
             num_inputs=num_meteo_enc,
@@ -98,21 +98,24 @@ class LSTMPL(LightningNet):
 
         self.output_layer = nn.Conv1d(
             in_channels=num_hidden_lstm,
-            out_channels=num_out,
+            out_channels=self.num_out,
             kernel_size=1,
-            groups=num_out
+            groups=self.num_out
         )
 
         self.to_channel_last = Transform(transform_fun=lambda x: x.transpose(1, 2))
 
-        self.split_outputs = Transform(transform_fun=lambda x: x.split(split_size=1, dim=-1))
+        if self.num_out > 1:
+            self.split_outputs = Transform(transform_fun=lambda x: x.split(split_size=1, dim=-1))
 
         if self.predict_var:
             self.softplus = nn.Softplus()
 
         self.save_hyperparameters()
 
-    def forward(self, x: Tensor, x_msc: Tensor | None = None, x_ano: Tensor | None = None, time: Tensor | None = None, s: Tensor | None = None) -> tuple[Tensor, Tensor]:
+    def forward(
+            self, x: Tensor,
+            s: Tensor | None = None) -> tuple[VarStackPattern, VarStackPattern]:
         """Model forward call.
 
         Args:
@@ -142,8 +145,9 @@ class LSTMPL(LightningNet):
         # (B, O, S) -> (B, S, O)
         out = self.to_channel_last(out)
 
-        # (B, S, O) -> O x (B, S, 1)
-        out = self.split_outputs(out)
+        if self.num_out > 1:
+            # (B, S, O) -> O x (B, S, 1)
+            out = self.split_outputs(out)
 
         if self.predict_msc:
             if self.predict_var:
@@ -161,7 +165,7 @@ class LSTMPL(LightningNet):
                 msc_var = None
                 ano_var = self.softplus(ano_var)
             else:
-                ano, = out
+                ano = out
                 ano_var = None
                 msc = None
                 msc_var = None
