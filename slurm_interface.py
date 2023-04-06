@@ -1,5 +1,6 @@
 
 import os
+import sys
 import shutil
 from argparse import ArgumentParser
 from subprocess import call
@@ -10,6 +11,9 @@ from project.utils.bash_script_templates import get_readme, get_full_run_script
 
 if __name__ == '__main__':
 
+    call_cmd = ['python'] + sys.argv
+    call_cmd = ' '.join(call_cmd)
+
     parser = ArgumentParser('SLURM interface')
     exp_args = parser.add_argument_group('experiment')
 
@@ -17,14 +21,15 @@ if __name__ == '__main__':
     exp_args.add_argument('--job_name', type=str, default='default')
     exp_args.add_argument('--log_dir', type=str, default='./experiments')
     exp_args.add_argument('--search_space', type=str, required=False)
-    exp_args.add_argument('--num_trials', type=int, default=24)
+    exp_args.add_argument('--num_trials', type=int, default=20)
+    exp_args.add_argument('--num_folds', type=int, default=10)
 
     cluster_args = parser.add_argument_group('cluster')
     cluster_args.add_argument('--per_experiment_nb_nodes', type=int, default=1)
     cluster_args.add_argument('--per_experiment_nb_cpus', type=int, default=32)
     cluster_args.add_argument('--per_experiment_nb_gpus', type=int, default=1)
     cluster_args.add_argument('--memory_mb_per_node', type=str, default='120G')
-    cluster_args.add_argument('--gpu_type', type=str, default='A40')
+    cluster_args.add_argument('--gpu_type', type=str)
     cluster_args.add_argument('--job_time', type=str, default='5-00:00:00')
     cluster_args.add_argument('--partition', type=str, default='gpu')
 
@@ -73,14 +78,19 @@ if __name__ == '__main__':
     cv_cmd_script_path = cluster.init_run(
         search_space_file=args.search_space,
         run_type='cv',
-        num_trials=12  # num folds
+        num_trials=args.num_folds  # num folds
+    )
+
+    xai_cmd_script_path = cluster.init_run(
+        search_space_file=args.search_space,
+        run_type='xai',
+        num_trials=args.num_folds  # num folds
     )
 
     # Print config to file (remove file if fails).
     r = call(
         f'python cli_interface.py fit {command} --print_config > {cluster.default_config_file}',
         shell=True,
-        #stdout=None,
         stderr=None
     )
 
@@ -90,7 +100,8 @@ if __name__ == '__main__':
 
     full_run_script = get_full_run_script(
         tune_script_path=tune_cmd_script_path,
-        cv_script_path=cv_cmd_script_path
+        cv_script_path=cv_cmd_script_path,
+        xai_script_path=xai_cmd_script_path
     )
 
     full_cmd_script_path = os.path.join(cluster.version_dir, 'run.sh')
@@ -99,9 +110,11 @@ if __name__ == '__main__':
         file.write(full_run_script)
 
     readme = get_readme(
+        call_cmd=call_cmd,
         full_script_path=full_cmd_script_path,
         tune_script_path=tune_cmd_script_path,
-        cv_script_path=cv_cmd_script_path
+        cv_script_path=cv_cmd_script_path,
+        xai_script_path=xai_cmd_script_path
     )
 
     slurm_cmd_script_path = os.path.join(cluster.version_dir, 'README.md')
