@@ -9,7 +9,7 @@ from prettytable import PrettyTable
 
 import numpy as np
 
-from typing import Union, Optional, Any, Callable
+from typing import Union, Optional, Any, Callable, NamedTuple
 
 
 def get_activation(activation: Union[str, None]) -> nn.Module:
@@ -663,8 +663,7 @@ class EncodeHourlyToDaily(nn.Module):
             num_hidden: int,
             num_encoding: int,
             dropout: float,
-            outpout_channel_last: bool
-        ):
+            outpout_channel_last: bool):
         """Initialize EncodeHourly class.
 
         Shapes:
@@ -799,3 +798,20 @@ def get_worker_id():
         return None
     else:
         return worker_info.id
+
+
+def batch2device(batch: NamedTuple, device: torch.device, detach: bool = False):
+    """Move batch to device."""
+    batch_dict = {}
+    for key, value in batch._asdict().items():
+        if isinstance(value, Tensor):
+            if detach:
+                batch_dict[key] = value.detach().to(device)
+            else:
+                batch_dict[key] = value.to(device)
+        elif key == 'coords':
+            batch_dict[key] = batch2device(value, device)
+        else:
+            batch_dict[key] = value
+
+    return type(batch)(**batch_dict)
