@@ -79,9 +79,9 @@ class LightningNet(pl.LightningModule):
         hourly_out: VarStackPattern
         daily_out, hourly_out = self(
             x=batch.f_hourly,
-            x_msc=batch.t_daily_msc,
-            x_ano=batch.t_daily_ano,
-            time=batch.coords.dayofyear,
+            # x_msc=batch.t_daily_msc,
+            # x_ano=batch.t_daily_ano,
+            # time=batch.coords.dayofyear,
             s=batch.f_static
         )
         out, var_means, var_uncertainties = self._check_return_variables(daily_out=daily_out, hourly_out=hourly_out)
@@ -267,7 +267,6 @@ class LightningNet(pl.LightningModule):
                     pred_var = pred_var[0, ..., 0].detach().cpu()         
                     if var == 'hourly':
                         pred_var = pred_var.flatten()           
-
 
                 obs = getattr(batch, 't_' + scale_name)[0, ..., 0].cpu()
 
