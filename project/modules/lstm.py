@@ -107,7 +107,7 @@ class LSTM(nn.Module):
         if self.has_static:
             if s is None:
                 raise ValueError(
-                    '`num_static_inputs` was set to >0, but `s` is `None`.'    
+                    '`num_static_inputs` was set to >0, but `s` is `None`.'
                 )
             out = self.residual(out, s)
 
