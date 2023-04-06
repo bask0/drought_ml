@@ -25,7 +25,7 @@ class CustomLightningCLI(LightningCLI):
 
 
 def pl_cli(CLI: LightningCLI, run: bool = True) -> LightningCLI:
-    default_config_file = {'default_config_files': ['project/config/base.yaml']}
+    default_config_file = {'default_config_files': ['config/base.yaml']}
 
     if run:
         trainer_defaults = {
