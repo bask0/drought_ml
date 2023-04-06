@@ -1,5 +1,6 @@
 
 import xarray as xr
+import numpy as np
 import pandas as pd
 from typing import overload
 
@@ -48,34 +49,74 @@ def sel_to_poly_corners(sel: dict[slice]) -> list[list[int]]:
 
 
 @overload
-def stacktime(ds: xr.Dataset) -> xr.Dataset:
+def stacktime(ds: xr.Dataset, dim: str) -> xr.Dataset:
     ...
 
 
 @overload
-def stacktime(ds: xr.DataArray) -> xr.DataArray:
+def stacktime(ds: xr.DataArray, dim: str) -> xr.DataArray:
     ...
 
 
-def stacktime(ds: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
+def stacktime(ds: xr.Dataset | xr.DataArray, dim: str = 'time') -> xr.Dataset | xr.DataArray:
     """Stack time (day) x hour into single time dimension.
 
     Args:
         ds: data to reformat with temporal dimensions 'time' and 'hour'.
-
+        dim: time dimension name, default is 'time'.
     Returns:
         ds with same type as input (xr.Dataset or xr.DataArray) with new dimension 'time'
             and dropped dimension 'hour'.
 
     """
-    for required_dim in ['time', 'hour']:
+    for required_dim in [dim, 'hour']:
         if required_dim not in ds.dims:
             raise KeyError(f'required dimension \'{required_dim}\' not found in `ds` with dimensions {ds.dims}.')
 
-    dsstacked = ds.stack(t=('time', 'hour'))
-    dsstacked['timvals'] = dsstacked.time + dsstacked.hour.astype('timedelta64[h]')
+    dsstacked = ds.stack(t=(dim, 'hour'))
+    dsstacked['timvals'] = dsstacked[dim] + dsstacked.hour.astype('timedelta64[h]')
 
-    return dsstacked.set_index(t='timvals').rename(time='old_time').rename(t='time').drop_vars('old_time')
+    return dsstacked.set_index(t='timvals').rename({dim: 'old_time'}).rename(t=dim).drop_vars('old_time')
+
+
+@overload
+def stackdims(ds: xr.Dataset, dims: list[str], new_dim: str, start_at_zero: bool) -> xr.Dataset:
+    ...
+
+
+@overload
+def stackdims(ds: xr.DataArray, dims: list[str], new_dim: str, start_at_zero: bool) -> xr.DataArray:
+    ...
+
+
+def stackdims(
+        ds: xr.Dataset | xr.DataArray,
+        dims: list[str],
+        new_dim: str,
+        start_at_zero: bool = True) -> xr.Dataset | xr.DataArray:
+    """Stack dimensions into single dimension.
+
+    Args:
+        ds: data to reformat with at least dimensions `dims`.
+        dims: dimension names to stack.
+        new_dim: new dimension name.
+        start_at_zero: whether to assign new coordinates from 0 to n-1 (True, default), or
+            from -n + 1 to 0.
+    Returns:
+        ds with same type as input (xr.Dataset or xr.DataArray) with new dimension `new_dim`
+            and dropped dimensions `dims`.
+
+    """
+    for required_dim in dims:
+        if required_dim not in ds.dims:
+            raise KeyError(f'required dimension \'{required_dim}\' not found in `ds` with dimensions {ds.dims}.')
+
+    dsstacked = ds.stack({'_temp_dim_': dims}).reset_index('_temp_dim_').drop(dims).rename({'_temp_dim_': new_dim})
+    n = len(dsstacked[new_dim])
+    if start_at_zero:
+        return dsstacked.assign_coords({new_dim: np.arange(0, n)})
+    else:
+        return dsstacked.assign_coords({new_dim: np.arange(-n + 1, 1)})
 
 
 @overload
