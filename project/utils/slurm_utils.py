@@ -122,7 +122,7 @@ class SlurmCluster(object):
 
         sub_commands = []
 
-        command =[
+        command = [
             '#!/bin/bash',
             '#',
             '# Auto-generated',
@@ -266,7 +266,8 @@ class SlurmCluster(object):
 
         run_args = self._args_to_cmd(hparams)
 
-        best_checkpoint_bath = os.path.join(self.log_dir, 'trial$(printf "%02d" $SLURM_ARRAY_TASK_ID)/checkpoints/best.ckpt')
+        best_checkpoint_bath = os.path.join(
+            self.log_dir, 'trial$(printf "%02d" $SLURM_ARRAY_TASK_ID)/checkpoints/best.ckpt')
 
         if run_type == 'tune':
             cmd = get_tune_slurm_script(
