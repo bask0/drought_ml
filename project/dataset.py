@@ -63,7 +63,7 @@ def batchpattern_collate(batch: list[BatchPattern]) -> BatchPattern:
     """Custom collate function to handle None values in BatchPattern.
 
     Note that this function is not intended to handle sparse None values, but the case
-    where None is returned for one or more elements in BatchPattern, i.e., completely empty\
+    where None is returned for one or more elements in BatchPattern, i.e., completely empty
     features or targets.
 
     Args:
@@ -98,7 +98,8 @@ class DataChunk(object):
             disable_shuffling: bool = False,
             dummy_data: bool = False,
             load_data: bool = True,
-            return_baseline: bool = False) -> None:
+            return_baseline: bool = False,
+            precip_zero_baseline: bool = False) -> None:
 
         if dummy_data:
             data = xr.zeros_like(data)
@@ -131,6 +132,7 @@ class DataChunk(object):
         self.disable_shuffling = disable_shuffling
         self.dummy_data = dummy_data
         self.return_baseline = return_baseline
+        self.precip_zero_baseline = precip_zero_baseline
 
         self.coords = self._get_coords()
 
@@ -159,7 +161,7 @@ class DataChunk(object):
             data_sel_hourly_baseline = xr.Dataset()
             for var in data_sel_hourly_msc.data_vars:
                 var_nosuffix = var.removesuffix('_msc')
-                if var_nosuffix == 'tp':
+                if var_nosuffix == 'tp' and self.precip_zero_baseline:
                     data_sel_hourly_baseline[var_nosuffix] = xr.full_like(data_sel_hourly[var_nosuffix], 0.0)
                 else:
                     data_sel_hourly_baseline[var_nosuffix] = msc_align(data_sel_hourly_msc[var], data_sel_hourly)
@@ -370,6 +372,8 @@ class QueueFiller(object):
             drop_last: bool = False,
             chunk_size: int = 20,
             disable_shuffling: bool = False,
+            return_baseline: bool = False,
+            precip_zero_baseline: bool = False,
             dummy_data: bool = False) -> None:
         """Initialize QueueFiller.
 
@@ -398,6 +402,11 @@ class QueueFiller(object):
             chunk_size: the latitude/longitude chunk sizes. Must divide the
                 `ds.lat`/`ds.lon` chunk size without remainder.
             disable_shuffling: if `True` shuffling will be turned off. Default is `False`.
+            return_baseline: if `True`, the baseline values for each feature are returned. This is the mean for static
+                features, the seasonality for the hourly features (except tp, where the baseline is all 0.0). Default
+                is `False.`
+            precip_zero_baseline: if `True`, the precipitation baseline is set to 0.0, else the seasonality is taken.
+                Default is `False`.
             dummy_data: if set to `True`, dummy data is returned and reading from disk is omitted; use for debugging.
                 Default is `False`.
 
@@ -424,6 +433,8 @@ class QueueFiller(object):
         self.drop_last = drop_last
         self.chunk_size = chunk_size
         self.disable_shuffling = disable_shuffling
+        self.return_baseline = return_baseline
+        self.precip_zero_baseline = precip_zero_baseline
         self.dummy_data = dummy_data
 
         self.chunk_bounds_lat = self.coords2bounds(self.mask, dim='lat', chunk_size=self.chunk_size)
@@ -478,7 +489,9 @@ class QueueFiller(object):
                                     data_scaling=self.data_scaling,
                                     disable_shuffling=self.disable_shuffling,
                                     dummy_data=self.dummy_data,
-                                    chunk_index=index
+                                    chunk_index=index,
+                                    return_baseline=self.return_baseline,
+                                    precip_zero_baseline=self.precip_zero_baseline
                                 )
                             )
                             continue
@@ -585,6 +598,10 @@ class DataQueue(IterableDataset):
             drop_last: bool = False,
             chunk_size: int = 20,
             disable_shuffling: bool = False,
+            num_split: int = 0,
+            split_idx: int = 0,
+            return_baseline: bool = False,
+            precip_zero_baseline: bool = False,
             dummy_data: bool = False):
         super().__init__()
 
@@ -604,6 +621,10 @@ class DataQueue(IterableDataset):
         self.drop_last = drop_last
         self.chunk_size = chunk_size
         self.disable_shuffling = disable_shuffling
+        self.num_split = num_split
+        self.split_idx = split_idx
+        self.return_baseline = return_baseline
+        self.precip_zero_baseline = precip_zero_baseline
         self.dummy_data = dummy_data
 
         _, _, self.num_year_samples = DataChunk.get_years(
@@ -611,6 +632,10 @@ class DataQueue(IterableDataset):
         self.num_samples = self.mask.sum().compute().item() * self.num_year_samples
         self.chunk_mask = (self.mask.coarsen(lat=chunk_size, lon=chunk_size).sum() > 0).compute()
         self.chunk_coords = np.argwhere(self.chunk_mask.values)
+        if self.num_split > 1:
+            chunk_ids = np.arange(self.num_chunks)
+            chunk_ids = np.array_split(chunk_ids, self.num_split)[self.split_idx]
+            self.chunk_coords = self.chunk_coords[chunk_ids]
         self.data_scaling = self._get_scaling(
             self.data, self.features_hourly, self.features_static, self.target_hourly, self.target_daily)
 
@@ -638,6 +663,8 @@ class DataQueue(IterableDataset):
             context_size=self.context_size,
             drop_last=False,
             disable_shuffling=self.disable_shuffling,
+            return_baseline=self.return_baseline,
+            precip_zero_baseline=self.precip_zero_baseline,
             dummy_data=self.dummy_data
         )
 
@@ -920,7 +947,7 @@ class GeoDataQueue(pl.LightningDataModule):
             target_hourly: str | None = None,
             batch_size: int = 50,
             chunk_buffer_size: int = 4,
-            queue_size: int = 20,
+            queue_size: int = 10,
             num_queue_workers: int = 12,
             chunk_size: int = 20,
             window_size: int = 2,
@@ -928,6 +955,11 @@ class GeoDataQueue(pl.LightningDataModule):
             full_seq_prediction: bool = True,
             n_mask_erode: int = 0,
             disable_shuffling: bool = False,
+            return_baseline: bool = False,
+            precip_zero_baseline: bool = False,
+            num_split: int = 0,
+            split_idx: int = -1,
+            full_predict_loader: bool = False,
             cube_path: str = '/Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr',
             dummy_data: bool = False,
             **dataloader_kwargs):
@@ -955,7 +987,7 @@ class GeoDataQueue(pl.LightningDataModule):
                 Note that smaller values lead to less randomness in the samples (they tend to come from
                 the same spatial chunk for continuous batches), and large values lead to long initialization
                 time. Values between 3 and 6 are suggested. Default is 4.
-            queue_size: the number of batches to queue up. Large values can lead to memory issues. Default is 20.
+            queue_size: the number of batches to queue up. Large values can lead to memory issues. Default is 10.
             num_queue_workers: number of workers that fill batch queue in parallel.
             chunk_size: the latitude/longitude chunk sizes. Must divide the
                 `ds.lat`/`ds.lon` chunk size without remainder.
@@ -969,6 +1001,16 @@ class GeoDataQueue(pl.LightningDataModule):
             n_mask_erode: if > 1, training grid cells with a distance < `n_mask_erode` will be removed from
                 the mask border to reduce dependency between CV folds. Values of 0 and 1 turn off erosion,
                 default is 0.
+            return_baseline: if `True`, the baseline values for each feature are returned. This is the mean for static
+                features, the seasonality for the hourly features (except tp, where the baseline is all 0.0). Default
+                is `False.`
+            precip_zero_baseline: if `True`, the precipitation baseline is set to 0.0, else the seasonality is taken.
+                Default is `False`.
+            num_split: optional integer n > 1 to split data chunks into n sets. This allows to create chunk-independent
+                dataloaders. Default is 0, meaning all the chunks are processed in a single dataloader.
+            split_idx: when `num_split` > 1, the `split_idx` determines wich split is used. Must be an integer in the
+                range 0 to `num_split` - 1.
+            full_predict_loader: if `True`, all chunks are predicted (not only the predict/test set). Default is `False`.
             cube_path: the path to the data cube (zarr format).
                 Default is '/Net/Groups/BGI/scratch/bkraft/drought_data/cube.zarr'.
             dummy_data: if set to `True`, dummy data is returned and reading from disk is omitted; use for debugging.
@@ -989,6 +1031,15 @@ class GeoDataQueue(pl.LightningDataModule):
         self.full_seq_prediction = full_seq_prediction
         self.n_mask_erode = n_mask_erode
         self.disable_shuffling = disable_shuffling
+        self.return_baseline = return_baseline
+        self.precip_zero_baseline = precip_zero_baseline
+        if (num_split > 1) and ((split_idx > num_split - 1) or (split_idx < 0)):
+            raise ValueError(
+                f'misconfiguration: `split_idx` must in range 0 to `num_split` - 1 (0-{num_split - 1}), is {split_idx}.'
+            )
+        self.num_split = num_split
+        self.split_idx = split_idx
+        self.full_predict_loader = full_predict_loader
         self.dummy_data = dummy_data
         self.dataloader_kwargs = dataloader_kwargs
 
@@ -1065,7 +1116,11 @@ class GeoDataQueue(pl.LightningDataModule):
             chunk_buffer_size = 1  # No randomness needed.
 
         elif cvset == 'predict':
-            mask = self.fold_mask.isin(self.test_folds)
+            if self.full_predict_loader:
+                predict_folds = self.train_folds + self.valid_folds + self.test_folds
+            else:
+                predict_folds = self.test_folds
+            mask = self.fold_mask.isin(predict_folds)
             chunk_buffer_size = 1  # No randomness needed.
 
         else:
@@ -1089,6 +1144,10 @@ class GeoDataQueue(pl.LightningDataModule):
             context_size=self.context_size,
             drop_last=False,
             disable_shuffling=disable_shuffling,
+            num_split=self.num_split,
+            split_idx=self.split_idx,
+            return_baseline=self.return_baseline,
+            precip_zero_baseline=self.precip_zero_baseline,
             dummy_data=self.dummy_data
         )
 
