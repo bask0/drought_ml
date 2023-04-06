@@ -8,7 +8,7 @@ import yaml
 from yaml.loader import SafeLoader
 
 from project.utils.bash_script_templates import \
-    get_tune_slurm_script, get_cv_slurm_script, get_tune_run_script, get_cv_run_script
+    get_tune_slurm_script, get_cv_slurm_script, get_xai_slurm_script, get_tune_run_script, get_cv_run_script, get_xai_run_script
 
 
 def sample_from_dict(d: dict):
@@ -30,7 +30,7 @@ class SlurmCluster(object):
             script_name: str,
             root_dir: str,
             job_name: str,
-            enable_log_out = True,
+            enable_log_out: bool = True,
             log_dir: str | None = None,
             modules: list[str] | None = [],
             job_time: str = '01:00:00',
@@ -47,8 +47,7 @@ class SlurmCluster(object):
             on_gpu: bool = False,
             commands: list[str] = [],
             slurm_commands: list[str] = [],
-            hpc_exp_number: int = 0,
-            ) -> None:
+            hpc_exp_number: int = 0) -> None:
         self.root_dir = root_dir
         self.job_name = job_name
 
@@ -96,10 +95,11 @@ class SlurmCluster(object):
         if not os.path.exists(self.log_dir):
             os.makedirs(self.log_dir)
 
-        for i in range(num_trials):
-            trial_dir = os.path.join(self.log_dir, self._trialid_to_name(i))
-            if not os.path.exists(trial_dir):
-                os.makedirs(trial_dir)
+        if run_type != 'xai':
+            for i in range(num_trials):
+                trial_dir = os.path.join(self.log_dir, self._trialid_to_name(i))
+                if not os.path.exists(trial_dir):
+                    os.makedirs(trial_dir)
 
         self.search_space_file = os.path.join(self.log_dir, 'search_space.txt')
         self.default_config_file = os.path.join(self.version_dir, 'default_config.yaml')
@@ -140,7 +140,10 @@ class SlurmCluster(object):
 
         # add out output
         if self.enable_log_out:
-            out_path = os.path.join(self.log_dir, 'trial%2a', 'slurm_output_%j.out')
+            if run_type == 'xai':
+                out_path = os.path.join(self.log_dir, 'slurm_output_trial%2a_%j.out')
+            else:
+                out_path = os.path.join(self.log_dir, 'trial%2a', 'slurm_output_%j.out')
             command = [
                 '# a file for job output, you can check job progress',
                 '#SBATCH --output={}'.format(out_path),
@@ -200,7 +203,7 @@ class SlurmCluster(object):
         # add job array specification
         command = [
             '# set job array',
-            '#SBATCH --array=0-{}%{}'.format(num_trials-1, num_parallel),
+            '#SBATCH --array=0-{}%{}'.format(num_trials - 1, num_parallel),
             '#################\n',
         ]
         sub_commands.extend(command)
@@ -263,7 +266,6 @@ class SlurmCluster(object):
 
         run_args = self._args_to_cmd(hparams)
 
-
         best_checkpoint_bath = os.path.join(self.log_dir, 'trial$(printf "%02d" $SLURM_ARRAY_TASK_ID)/checkpoints/best.ckpt')
 
         if run_type == 'tune':
@@ -282,6 +284,11 @@ class SlurmCluster(object):
                 best_config_file=os.path.join(self.log_dir, 'best_config.yaml'),
                 default_config_file=self.default_config_file,
                 best_checkpoint_bath=best_checkpoint_bath
+            )
+        elif run_type == 'xai':
+            cmd = get_xai_slurm_script(
+                version_dir=self.version_dir,
+                num_trials=num_trials
             )
 
         sub_commands.append(cmd)
@@ -374,9 +381,12 @@ class SlurmCluster(object):
             with open(self.search_space_file, 'w') as f:
                 hp_data = f.write(samples)
 
+        elif run_type == 'xai':
+            pass
+
         else:
             raise ValueError(
-                '`run_type` misconfiguration, must be \'tune\' or \'cv\', is \'{run_type}\'.'
+                '`run_type` misconfiguration, must be \'tune\', \'cv\', or \'xai\', is \'{run_type}\'.'
             )
 
         slurm_cmd = self._build_slurm_command(
@@ -390,9 +400,11 @@ class SlurmCluster(object):
         )
 
         if run_type == 'tune':
-            run_cmd  = get_tune_run_script(script_path=tune_slurm_cmd_script_path, num_trials=num_trials)
+            run_cmd = get_tune_run_script(script_path=tune_slurm_cmd_script_path, num_trials=num_trials)
+        elif run_type == 'cv':
+            run_cmd = get_cv_run_script(script_path=tune_slurm_cmd_script_path, num_trials=num_trials)
         else:
-            run_cmd  = get_cv_run_script(script_path=tune_slurm_cmd_script_path, num_trials=num_trials)
+            run_cmd = get_xai_run_script(script_path=tune_slurm_cmd_script_path, num_folds=num_trials)
 
         run_cmd_script_path = self._save_run_cmd(run_cmd=run_cmd, run_type=run_type)
 
