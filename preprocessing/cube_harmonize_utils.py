@@ -266,7 +266,7 @@ def write_data(in_path: str, out_path: str, dryrun: bool = False) -> None:
         'tp': {
             'name': 'tp',
             'long_name': 'Total precipitation',
-            'units': 'm'
+            'units': 'mm'
         },
     }
 
