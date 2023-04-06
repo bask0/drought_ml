@@ -80,7 +80,7 @@ def subplots_ortho_dense(text=None, add_borders=True):
     return fig, [ax1, ax2]
 
 
-def add_hist(ds, ax, cmap, vmin=None, vmax=None, robust=True, label=None, histogram_placement=[0.04, 0.35, 0.4, 0.3], bins=30, add_contour=True, contour_lw=0.4, **kwargs):
+def map_hist(ds, ax, cmap, vmin=None, vmax=None, robust=True, label=None, histogram_placement=[0.04, 0.35, 0.4, 0.3], bins=30, add_contour=True, contour_lw=0.4, **kwargs):
 
     axh = ax.inset_axes(histogram_placement)
 
@@ -146,7 +146,7 @@ def add_hist(ds, ax, cmap, vmin=None, vmax=None, robust=True, label=None, histog
     #         labs_new.append(l)
 
     #axh.set_xticklabels(labs_new)
-    axh.xaxis.set_tick_params(labelsize=9, pad=0.2)
+    axh.xaxis.set_tick_params(labelsize=8, pad=0.2)
     axh.axvline(data_mean, color='0.3', lw=1.2)
     axh.axvline(data_median, color='0.3', ls=':', lw=1.2)
 
@@ -159,12 +159,12 @@ def add_hist(ds, ax, cmap, vmin=None, vmax=None, robust=True, label=None, histog
         ha='left',
         va='top',
         transform=ax.transAxes,
-        fontsize=9,
+        fontsize=8,
         style='italic'
     )
 
     
-def plot_map(ds, label, title=None, vmin=None, vmax=None, robust=True, cmap='coolwarm', do_center=False):
+def plot_map(ds, label, title=None, vmin=None, vmax=None, robust=True, cmap='coolwarm', do_center=False, add_hist=True):
 
     fig, axes = subplots_ortho_dense()
 
@@ -187,10 +187,11 @@ def plot_map(ds, label, title=None, vmin=None, vmax=None, robust=True, cmap='coo
             ha='center',
             va='top',
             transform=ax.transAxes,
-            fontsize=9
+            fontsize=8
         )
 
-    add_hist(ds, ax=axes[1], cmap=cmap, label=label, vmin=vmin, vmax=vmax, robust=robust)
+    if add_hist:
+        map_hist(ds, ax=axes[1], cmap=cmap, label=label, vmin=vmin, vmax=vmax, robust=robust)
 
     gridline_spec = dict(
         linewidth=0.7,
