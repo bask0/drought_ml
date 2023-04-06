@@ -1,5 +1,6 @@
 
 import inspect
+from datetime import datetime
 
 
 def get_tune_slurm_script(
@@ -100,6 +101,45 @@ def get_cv_slurm_script(
     return '\n' + inspect.cleandoc(script) + '\n'
 
 
+def get_xai_slurm_script(
+        version_dir: str,
+        num_trials: int) -> str:
+
+    script = \
+        """
+
+        num_trials={num_trials}
+
+        num_split=0
+        batch_size=20
+
+        while getopts ":s:b:" option; do
+        case $option in
+            s)
+            num_split=$OPTARG
+            ;;
+            b)
+            batch_size=$OPTARG
+            ;;
+            \?) # Invalid option
+            echo "Error: Invalid option"
+            exit
+            ;;
+        esac
+        done
+
+        let "trial = $SLURM_ARRAY_TASK_ID / num_split"
+        let "split_idx = $SLURM_ARRAY_TASK_ID % num_split"
+
+        srun python integrated_gradients.py -p {version_dir} --gpu 0 --type cv --batch_size $batch_size --num_split $num_split --trial $trial --split_idx $split_idx
+        """.format(
+            version_dir=version_dir,
+            num_trials=num_trials
+        )
+
+    return '\n' + inspect.cleandoc(script) + '\n'
+
+
 def get_tune_run_script(script_path: str, num_trials: int) -> str:
 
     script = \
@@ -111,7 +151,7 @@ def get_tune_run_script(script_path: str, num_trials: int) -> str:
         # Display Help
         echo "Run hyper parameter tuning script."
         echo
-        echo "Syntax: tune.sh [OPTIONS]"
+        echo "Syntax: run_tune.sh [OPTIONS]"
         echo "Options:"
         echo "  -h    Print this Help."
         echo "  -n    Maximum number of jobs to run in parallel, default is '1'."
@@ -148,7 +188,7 @@ def get_tune_run_script(script_path: str, num_trials: int) -> str:
         fi
 
         sbatch --wait --array 0-{num_trials}%$num_parallel {script_path}
-        """.format(script_path=script_path, num_trials=num_trials-1)
+        """.format(script_path=script_path, num_trials=num_trials - 1)
 
     return inspect.cleandoc(script) + '\n'
 
@@ -162,9 +202,9 @@ def get_cv_run_script(script_path: str, num_trials: int) -> str:
         Help()
         {{
         # Display Help
-        echo "Run hyper parameter tuning script."
+        echo "Run cross validation script."
         echo
-        echo "Syntax: tune.sh [OPTIONS] args"
+        echo "Syntax: run_cv.sh [OPTIONS] args"
         echo "Options:"
         echo "  -h    Print this Help."
         echo "  -n    Maximum number of jobs to run in parallel, default is '1'."
@@ -215,12 +255,12 @@ def get_cv_run_script(script_path: str, num_trials: int) -> str:
         fi
 
         sbatch --wait --array 0-{num_trials}%$num_parallel {script_path} $run_mode $use_default
-        """.format(script_path=script_path, num_trials=num_trials-1)
+        """.format(script_path=script_path, num_trials=num_trials - 1)
 
     return inspect.cleandoc(script) + '\n'
 
 
-def get_full_run_script(tune_script_path: str, cv_script_path: str) -> str:
+def get_xai_run_script(script_path: str, num_folds: int) -> str:
 
     script = \
         """
@@ -229,7 +269,67 @@ def get_full_run_script(tune_script_path: str, cv_script_path: str) -> str:
         Help()
         {{
         # Display Help
-        echo "Run hyper parameter tuning and cross validation script."
+        echo "Run xai script."
+        echo
+        echo "Syntax: tune.sh [OPTIONS] args"
+        echo "Options:"
+        echo "  -h    Print this Help."
+        echo "  -s    Number of splits per dataloader, default is '1'."
+        echo "  -b    Batch size, default is '20'."
+        echo "  -n    Maximum number of jobs to run in parallel, default is '1'."
+
+        }}
+
+        num_folds={num_folds}
+
+        num_parallel=1
+        num_split=1
+        batch_size=20
+
+        while getopts ":hn:s:b:" option; do
+        case $option in
+            h) # display Help
+            Help
+            exit
+            ;;
+            n)
+            num_parallel=$OPTARG
+            ;;
+            s)
+            num_split=$OPTARG
+            ;;
+            b)
+            batch_size=$OPTARG
+            ;;
+            :)
+            printf "Error: missing argument for -%s\\n" "$OPTARG" >&2
+            exit 1
+            ;;
+            \?) # Invalid option
+            echo "Error: Invalid option"
+            exit
+            ;;
+        esac
+        done
+
+        let "num_runs = num_folds * num_split - 1"
+
+        sbatch --wait --array 0-$num_runs%$num_parallel {script_path} -s $num_split -b $batch_size
+        """.format(script_path=script_path, num_folds=num_folds)
+
+    return inspect.cleandoc(script) + '\n'
+
+
+def get_full_run_script(tune_script_path: str, cv_script_path: str, xai_script_path: str) -> str:
+
+    script = \
+        """
+        #!/bin/bash
+
+        Help()
+        {{
+        # Display Help
+        echo "Run hyper parameter tuning, cross validation, and xai script."
         echo
         echo "Syntax: tune.sh [OPTIONS]"
         echo "Options:"
@@ -273,18 +373,30 @@ def get_full_run_script(tune_script_path: str, cv_script_path: str) -> str:
 
         bash {cv_script_path} -n $num_parallel
 
-        """.format(tune_script_path=tune_script_path, cv_script_path=cv_script_path)
+        wait
+
+        bash {xai_script_path} -n $num_parallel
+
+        """.format(tune_script_path=tune_script_path, cv_script_path=cv_script_path, xai_script_path=xai_script_path)
 
     return inspect.cleandoc(script) + '\n'
 
 
-def get_readme(full_script_path: str, tune_script_path: str, cv_script_path: str) -> str:
+def get_readme(
+        call_cmd: str,
+        full_script_path: str,
+        tune_script_path: str,
+        cv_script_path: str,
+        xai_script_path: str) -> str:
 
     script = \
         """
-        Run hyperparameter tuning ('tune') and cross-validation ('cv').
+        Automatically generated on {timestamp} with configuration:
+        >>> {call_cmd}
 
-        tune and cv:
+        Run hyperparameter tuning ('tune'), cross-validation ('cv'), and integrated grads ('xai').
+
+        tune, cv, and xai:
             bash {full_script_path} OPTIONS
 
             Options:
@@ -296,7 +408,7 @@ def get_readme(full_script_path: str, tune_script_path: str, cv_script_path: str
 
         tune:
             bash {tune_script_path} OPTIONS
-        
+
             Options:
                 -n NUM PARALLEL JOBS
 
@@ -306,7 +418,7 @@ def get_readme(full_script_path: str, tune_script_path: str, cv_script_path: str
 
         cv:
             bash {cv_script_path} OPTIONS ARGS
-        
+
             Options:
                 -n NUM PARALLEL JOBS
                 -d FLAG ENABLES CV WITH DEFAULT ARGS INSTEAD OF BEST HPS
@@ -314,6 +426,7 @@ def get_readme(full_script_path: str, tune_script_path: str, cv_script_path: str
                 full FIT AND PREDICT (DEFAULT)
                 fit FIT ONLY
                 predict PREDICT ONLY
+
             Examples:
                 # Run cross validation (fit and predict) with 4 parallel jobs.
                 bash {cv_script_path} -n 4
@@ -322,9 +435,26 @@ def get_readme(full_script_path: str, tune_script_path: str, cv_script_path: str
                 # Run cross validation (only fit) with 4 parallel jobs (HPs from default config).
                 bash {cv_script_path} -n 4 -d fit
 
+        xai:
+            bash {xai_script_path} OPTIONS
+
+            Options:
+                -n NUM PARALLEL JOBS
+                -s NUM DATALOADER SPLIT
+                -b BATCH SIZE
+
+            Examples:
+                # Run xai with 4 parallel jobs and a batch size of 30.
+                bash {xai_script_path} -n 4 -b
+                # Run xai with 20 parallel jobs and each fold split into two chunks.
+                bash {xai_script_path} -n 20 -s 2
+
         """.format(
+            call_cmd=call_cmd,
+            timestamp=datetime.now().strftime('%Y-%m-%d_%H-%M-%S'),
             full_script_path=full_script_path,
             tune_script_path=tune_script_path,
-            cv_script_path=cv_script_path)
+            cv_script_path=cv_script_path,
+            xai_script_path=xai_script_path)
 
     return inspect.cleandoc(script) + '\n'
