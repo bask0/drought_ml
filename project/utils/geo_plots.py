@@ -44,7 +44,7 @@ def subplots_ortho(ncols=1, center=(0, 0), figsize=(8, 8), glob=True):
     return fig, axes[0, :]
 
 
-def subplots_ortho_dense(text=None, add_borders=True):
+def subplots_ortho_dense(text=None, add_borders=True, add_lakes=True):
     fig = plt.figure(constrained_layout=True, figsize=(4, 5.4))
 
     map_proj = ccrs.Orthographic(0, 0)
@@ -61,6 +61,8 @@ def subplots_ortho_dense(text=None, add_borders=True):
         ax.add_feature(cfeat.COASTLINE, lw=.5, zorder=10)
         if add_borders:
             ax.add_feature(cfeat.BORDERS, lw=0.3)
+        if add_lakes:
+            ax.add_feature(cfeat.LAKES, facecolor='k', edgecolor='none')
 
     ax1.set_extent([-10, 60, 32, 70])
     ax2.set_extent([-18, 50, -31, 14.5])
@@ -80,7 +82,7 @@ def subplots_ortho_dense(text=None, add_borders=True):
     return fig, [ax1, ax2]
 
 
-def map_hist(ds, ax, cmap, vmin=None, vmax=None, robust=True, label=None, histogram_placement=[0.04, 0.35, 0.4, 0.3], bins=30, add_contour=True, contour_lw=0.4, **kwargs):
+def map_hist(ds, ax, cmap, vmin=None, vmax=None, robust=True, label=None, histogram_placement=[0.04, 0.35, 0.4, 0.3], bins=30, add_contour=True, add_hist_text=True, contour_lw=0.4, **kwargs):
 
     axh = ax.inset_axes(histogram_placement)
 
@@ -153,15 +155,16 @@ def map_hist(ds, ax, cmap, vmin=None, vmax=None, robust=True, label=None, histog
     if label is not None:
         axh.set_xlabel(label, fontsize=9)
 
-    axh.text(
-        0.02, 0.2,
-        'Area-weighted distribution\nof map values with mean ({0})\nand median ({1}).'.format(u'\u2500', u'\u2509'),
-        ha='left',
-        va='top',
-        transform=ax.transAxes,
-        fontsize=8,
-        style='italic'
-    )
+    if add_hist_text:
+        axh.text(
+            0.02, 0.2,
+            'Area-weighted distribution\nof map values with mean ({0})\nand median ({1}).'.format(u'\u2500', u'\u2509'),
+            ha='left',
+            va='top',
+            transform=ax.transAxes,
+            fontsize=8,
+            style='italic'
+        )
 
     
 def plot_map(ds, label, title=None, vmin=None, vmax=None, robust=True, cmap='coolwarm', do_center=False, add_hist=True):
@@ -215,3 +218,26 @@ def plot_map(ds, label, title=None, vmin=None, vmax=None, robust=True, cmap='coo
 
 
     return fig, axes
+
+
+def plot_loc(dummy, lat, lon, path=None):
+    fig, ax = plot_map(
+        dummy * np.nan,
+        label='',
+        title='',
+        cmap='coolwarm',
+        robust=True,
+        do_center=True,
+        add_hist=False
+    )
+
+    s = 2
+
+    for ax_ in ax:
+        ax_.plot([lon - s, lon + s], [lat, lat], transform=ccrs.Geodetic(), color='red', lw=1.8)
+        ax_.plot([lon, lon], [lat - s, lat + s], transform=ccrs.Geodetic(), color='red', lw=1.8)
+
+    if path is not None:
+        savefig(fig, path=path, transparent=True)
+
+    return fig, ax
