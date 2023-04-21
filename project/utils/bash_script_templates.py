@@ -275,7 +275,7 @@ def get_xai_run_script(script_path: str, num_folds: int) -> str:
         echo "Options:"
         echo "  -h    Print this Help."
         echo "  -s    Number of splits per dataloader, default is '1'."
-        echo "  -b    Batch size, default is '20'."
+        echo "  -b    Batch size, default is '10'."
         echo "  -n    Maximum number of jobs to run in parallel, default is '1'."
 
         }}
@@ -284,7 +284,7 @@ def get_xai_run_script(script_path: str, num_folds: int) -> str:
 
         num_parallel=1
         num_split=1
-        batch_size=20
+        batch_size=10
 
         while getopts ":hn:s:b:" option; do
         case $option in
@@ -445,7 +445,7 @@ def get_readme(
 
             Examples:
                 # Run xai with 4 parallel jobs and a batch size of 30.
-                bash {xai_script_path} -n 4 -b
+                bash {xai_script_path} -n 4 -b 30
                 # Run xai with 20 parallel jobs and each fold split into two chunks.
                 bash {xai_script_path} -n 20 -s 2
 
