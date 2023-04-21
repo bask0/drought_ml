@@ -629,16 +629,28 @@ class DataQueue(IterableDataset):
 
         _, _, self.num_year_samples = DataChunk.get_years(
             data=self.data, window_size=window_size, context_size=context_size)
-        self.num_samples = self.mask.sum().compute().item() * self.num_year_samples
         self.chunk_mask = (self.mask.coarsen(lat=chunk_size, lon=chunk_size).sum() > 0).compute()
         self.chunk_coords = np.argwhere(self.chunk_mask.values)
         if self.num_split > 1:
             chunk_ids = np.arange(self.num_chunks)
-            chunk_ids = np.array_split(chunk_ids, self.num_split)[self.split_idx]
-            self.chunk_coords = self.chunk_coords[chunk_ids]
+            chunk_ids = np.array_split(chunk_ids, self.num_split)
+            keep_ids = chunk_ids.pop(self.split_idx)
+            remove_ids = np.concatenate(chunk_ids)
+
+            remove_chunk_coords = self.chunk_coords[remove_ids]
+            self.chunk_coords = self.chunk_coords[keep_ids]
+
+            lat_chunk_coords = QueueFiller.coords2bounds(mask=self.mask, dim='lat', chunk_size=self.chunk_size)
+            lon_chunk_coords = QueueFiller.coords2bounds(mask=self.mask, dim='lon', chunk_size=self.chunk_size)
+
+            for lat_i, lon_i in remove_chunk_coords:
+                self.mask[{'lat': slice(*lat_chunk_coords[lat_i]), 'lon': slice(*lon_chunk_coords[lon_i])}] = 0
+                self.chunk_mask[{'lat': lat_i, 'lon': lon_i}] = 0
+
         self.data_scaling = self._get_scaling(
             self.data, self.features_hourly, self.features_static, self.target_hourly, self.target_daily)
 
+        self.num_samples = self.mask.sum().compute().item() * self.num_year_samples
         self._check_ds(self.data, self.mask)
 
     def get_queue_filler(
