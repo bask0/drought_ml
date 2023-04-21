@@ -179,7 +179,7 @@ def msc_align(msc: xr.Dataset | xr.DataArray, ref: xr.Dataset | xr.DataArray):
     if 'dayofyear' not in msc.dims:
         raise KeyError(f'required dimension \'dayofyear\' not found in `msc` with dimensions {msc.dims}.')
 
-    for required_var in ['time', 'hour']:
+    for required_var in ['time']:
         if required_var not in ref.dims:
             raise KeyError(f'required dimension \'{required_var}\' not found in `msc` with dimensions {ref.dims}.')
 
