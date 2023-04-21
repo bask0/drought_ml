@@ -209,9 +209,14 @@ class SlurmCluster(object):
         sub_commands.extend(command)
 
         # pick memory per node
+        if run_type == 'xai':
+            mem = self.memory_mb_per_node * 2
+        else:
+            mem = self.memory_mb_per_node
+
         command = [
             '# memory per node',
-            '#SBATCH --mem={}'.format(self.memory_mb_per_node),
+            '#SBATCH --mem={}'.format(mem),
             '#################\n'
         ]
         sub_commands.extend(command)
