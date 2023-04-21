@@ -2,6 +2,7 @@
 from argparse import ArgumentParser
 import xarray as xr
 import zarr
+import dask
 import numpy as np
 import pandas as pd
 import multiprocessing as mp
@@ -12,27 +13,32 @@ import yaml
 from yaml import SafeLoader
 from captum.attr import IntegratedGradients
 import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 import importlib.util
 import os
 import sys
+import gc
 from time import sleep
 from typing import Callable
 from numpy.typing import ArrayLike
 import logging
 
 from project.dataset import GeoDataQueue, QueueFiller
-from project.utils.types import BatchPattern
+from project.utils.types import BatchPattern, Coords
 
-torch.backends.cudnn.enabled = False
-
-
+dask.config.set(scheduler='synchronous')
 logger = logging.getLogger(__name__)
 
 
 class IGWriter(object):
-    def __init__(self, zarr_path: str, dataloader: torch.utils.data.DataLoader):
+    def __init__(
+            self,
+            zarr_path: str,
+            dataloader: torch.utils.data.DataLoader,
+            hourly: bool):
         logger.debug('Initializing IGWriter.')
         self.zarr_path = zarr_path
+        self.hourly = hourly
 
         self.dataloader = dataloader
         self.mask = self.dataloader.dataset.mask.load()
@@ -43,14 +49,14 @@ class IGWriter(object):
 
         self.zarr_file = None
 
-    def write_attr(self, attr_hourly: ArrayLike, attr_static: ArrayLike, batch: BatchPattern):
+    def write_attr(self, attr_dyn: ArrayLike, attr_static: ArrayLike, coords: Coords):
 
         if self.zarr_file is None:
             self.zarr_file = xr.open_zarr(self.zarr_path)
 
-        chunk_ids = batch.coords.chunk.cpu().numpy()
-        latitudes = batch.coords.lat.cpu().numpy()
-        longitudes = batch.coords.lon.cpu().numpy()
+        chunk_ids = coords.chunk.cpu().numpy()
+        latitudes = coords.lat.cpu().numpy()
+        longitudes = coords.lon.cpu().numpy()
         u = ' | '.join([f'chunk_id {u:d}: n={n:d}' for u, n in zip(*np.unique(chunk_ids, return_counts=True))])
         logger.debug(f'Adding attributions: {u}.')
 
@@ -65,10 +71,8 @@ class IGWriter(object):
                 lon_bounds = slice(*self.chunk_bounds_lon[chunk_lon])
                 num_samples = self.mask.isel(lat=lat_bounds, lon=lon_bounds).sum().compute().item()
 
-                chunk_ds = self.zarr_file.isel(lat=lat_bounds, lon=lon_bounds).load()
-
                 self.chunks[chunk_id] = {
-                    'ds': chunk_ds,
+                    'ds': self.zarr_file.isel(lat=lat_bounds, lon=lon_bounds).load(),
                     'num_samples': num_samples,
                     'num_saved': 0,
                     'lat_bounds': lat_bounds,
@@ -80,7 +84,7 @@ class IGWriter(object):
                 )
 
             for v, var in enumerate(self.dataloader.dataset.features_hourly):
-                for i in range(attr_hourly.shape[0]):
+                for i in range(attr_dyn.shape[0]):
                     lat = self.chunks[chunk_id]['ds'].lat.sel(lat=latitudes[i], method='nearest').item()
                     lon = self.chunks[chunk_id]['ds'].lon.sel(lon=longitudes[i], method='nearest').item()
 
@@ -89,7 +93,7 @@ class IGWriter(object):
                             'lat': lat,
                             'lon': lon,
                         }
-                    ] = attr_hourly[i, ..., v]
+                    ] = attr_dyn[i, ..., v]
 
             for v, var in enumerate(self.dataloader.dataset.features_static):
                 for i in range(attr_static.shape[0]):
@@ -109,6 +113,7 @@ class IGWriter(object):
                 logger.debug(f'Writing chunk {chunk_id} to file.')
                 self.write_chunk(self.chunks[chunk_id])
                 del self.chunks[chunk_id]
+                gc.collect()  # Attempt #982 to solve silent OOM error.
                 logger.debug(f'Done writing chunk {chunk_id} to file. {len(self.chunks)} loaded currently.')
 
         logger.debug(f'Churrent chunks: {self.chunk_summary()}.')
@@ -121,7 +126,10 @@ class IGWriter(object):
         self.chunks = {}
 
     def write_chunk(self, chunk: dict) -> None:
-        chunk_ds = chunk['ds'].drop_vars(['time', 'context', 'hour'])
+        if self.hourly:
+            chunk_ds = chunk['ds'].drop_vars(['time', 'context', 'hour'])
+        else:
+            chunk_ds = chunk['ds'].drop_vars(['time', 'context'])
 
         chunk_ds.to_zarr(self.zarr_file.encoding['source'], consolidated=False, region={
             'lat': chunk['lat_bounds'],
@@ -147,7 +155,10 @@ class Attributions(object):
             end_date: str,
             device: torch.device,
             ig_writer: IGWriter,
+            hourly: bool,
             zarr_dir: str) -> None:
+
+        logger.debug('Initializing Attributions.')
 
         self.model_call = model_call
         self.window_start = init_batch.coords.window_start[0]
@@ -168,6 +179,7 @@ class Attributions(object):
             freq='D',
             periods=init_batch.f_hourly.shape[1])[0].strftime('%Y-%m-%d')
 
+        self.hourly = hourly
         self.ig_writer = ig_writer
         self.zarr_dir = zarr_dir
         self.ig = IntegratedGradients(self.model_call)
@@ -183,10 +195,13 @@ class Attributions(object):
 
         self.device = device
 
+        logger.debug('Creating empty zarr file.')
         self.emptyXR()
         self.zarr_ds = xr.open_zarr(self.zarr_dir)
 
         self.writer_process: mp.Process | None = None
+
+        logger.debug('Initializing Attributions done.')
 
     def __len__(self) -> int:
         return self.end_idx - self.start_idx + 1
@@ -200,7 +215,11 @@ class Attributions(object):
             target=-1
         )
 
-        attr = [a.detach().cpu().numpy() for a in attributions]
+        attr = [
+            attributions[0].mean(dim=-2).detach().cpu().numpy(),
+            attributions[1].detach().cpu().numpy(),
+        ]
+
         attributions = None
         return attr
 
@@ -226,27 +245,33 @@ class Attributions(object):
 
     def get_batch_attr(self, batch: BatchPattern) -> None:
         #batch = batch2device(batch, self.device)
-        attr_hourly = []
+        attr_dynamic = []
         attr_static = []
 
         for a in self.iter_batch(batch):
-            attr_hourly.append(a[0])
+            attr_dynamic.append(a[0])
             attr_static.append(a[1])
 
-        attr_hourly = np.stack(attr_hourly, axis=2)
+        attr_dynamic = np.stack(attr_dynamic, axis=2)
         attr_static = np.stack(attr_static, axis=1)
 
         while not self.writer_ready():
             logger.warning('Writer process busy, waiting to continue')
             sleep(20)
 
-        self.writer_process = mp.Process(target=self.ig_writer.write_attr, args=(attr_hourly, attr_static, batch))
+        self.writer_process = mp.Process(
+            target=self.ig_writer.write_attr, args=(attr_dynamic, attr_static, batch.coords))
+        # self.ig_writer.write_attr(attr_dynamic, attr_static, batch.coords)
         self.writer_process.start()
 
     def attribute(self, dataloader: torch.utils.data.DataLoader):
-        for batch in tqdm.tqdm(dataloader, desc='Dataloader'):
-            self.get_batch_attr(batch)
+        logger.debug('Start iterating dataloader.')
+        with logging_redirect_tqdm():
+            for batch in tqdm.tqdm(dataloader, desc='Dataloader'):
+                self.get_batch_attr(batch)
+        logger.debug('Finalizing IGWriter.')
         self.ig_writer.finalize()
+        logger.debug('Finalizing IGWriter done.')
 
     def _arg_check(self, batch: BatchPattern, context_size: int, start_date: str) -> None:
         for el in ['window_start', 'window_end', 'num_days']:
@@ -270,6 +295,9 @@ class Attributions(object):
         obs = self.geodata.ds.sel(
             time=slice(self.start_date, self.end_date))[self.geodata.features_hourly + self.geodata.features_static]
 
+        if not self.hourly:
+            obs = obs.isel(hour=0).drop('hour')
+
         attr = xr.full_like(obs, np.nan)
         for var in attr.data_vars:
             if 'time' in attr[var].dims:
@@ -279,20 +307,28 @@ class Attributions(object):
 
         lat_chunksize = obs.chunksizes['lat'][0]
         lon_chunksize = obs.chunksizes['lon'][0]
-        attr = attr.chunk({
-            'context': -1,
-            'time': 10,
-            'hour': -1,
-            'lat': lat_chunksize,
-            'lon': lon_chunksize
-        })
+
+        if self.hourly:
+            attr = attr.chunk({
+                'context': -1,
+                'time': 10,
+                'hour': -1,
+                'lat': lat_chunksize,
+                'lon': lon_chunksize
+            })
+        else:
+            attr = attr.chunk({
+                'context': -1,
+                'time': 10,
+                'lat': lat_chunksize,
+                'lon': lon_chunksize
+            })
 
         attr.to_zarr(self.zarr_dir, compute=False, mode='a')
 
     def finalize(self):
         self.writer_process.join()
         self.writer_process = None
-        zarr.consolidate_metadata(self.zarr_dir)
 
 
 class CustomManager(BaseManager):
@@ -301,6 +337,7 @@ class CustomManager(BaseManager):
 
 
 if __name__ == '__main__':
+
     parser = ArgumentParser()
     parser.add_argument(
         '-p', '--path',
@@ -349,10 +386,15 @@ if __name__ == '__main__':
         help='the batch size'
     )
     parser.add_argument(
+        '--hourly',
+        action='store_true',
+        help='if set, hourly attributions are combuted, otherwise daily'
+    )
+    parser.add_argument(
         '--logger_level',
         type=int,
-        default=2,
-        help='the logger level: 0=DEBUG, 1=INFO, 2:WARN, 3:ERROR, default is 2'
+        default=0,
+        help='the logger level: 0=DEBUG, 1=INFO, 2:WARN, 3:ERROR, default is 0'
     )
 
     args = parser.parse_args()
@@ -368,6 +410,10 @@ if __name__ == '__main__':
         raise ValueError(
             f'`type` must be one of \'cv\' or \'tune\', is {args.type}'
         )
+
+
+    # fold_id = args.trial
+    fold_id = 0
 
     exp_dir = os.path.join(args.path, args.type)
     if args.type == 'cv':
@@ -385,9 +431,9 @@ if __name__ == '__main__':
     else:
         # Avoid that multiple processes create the .zarr file at the same time. Only first process
         # creates one.
-        sleep(20)
+        sleep(60)
 
-    exp_model = os.path.join(exp_dir, f'trial{args.trial:02d}/checkpoints/best.ckpt')
+    exp_model = os.path.join(exp_dir, f'trial{fold_id:02d}/checkpoints/best.ckpt')
 
     for p in [exp_config, exp_model]:
         if not os.path.exists(p):
@@ -398,6 +444,8 @@ if __name__ == '__main__':
 
     data_config = config['data']
     model_path = config['model']['class_path']
+    if 'LSTM' in model_path:
+        torch.backends.cudnn.enabled = False
     model_path, model_name = model_path.rsplit('.', 1)
     model_path = model_path.replace('.', '/')
     model_path += '.py'
@@ -434,7 +482,7 @@ if __name__ == '__main__':
     CustomManager.register('IGWriter', IGWriter)
 
     with CustomManager() as manager:
-        shared_igwriter = manager.IGWriter(ig_save_path, dataloader)
+        shared_igwriter = manager.IGWriter(ig_save_path, dataloader, args.hourly)
 
         attr = Attributions(
             model_call=model_call,
@@ -445,7 +493,10 @@ if __name__ == '__main__':
             end_date='2015-12-31',
             device=device,
             ig_writer=shared_igwriter,
-            zarr_dir=ig_save_path
+            hourly=args.hourly,
+            zarr_dir=ig_save_path,
         )
         attr.attribute(dataloader=dataloader)
         attr.finalize()
+
+    zarr.consolidate_metadata(ig_save_path)
